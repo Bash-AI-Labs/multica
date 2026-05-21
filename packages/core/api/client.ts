@@ -117,6 +117,12 @@ import type {
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
 } from "../types";
+import type {
+  Integration,
+  CreateIntegrationRequest,
+  UpdateIntegrationRequest,
+  ExternalIssueLink,
+} from "../types/integration";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
   CloudRuntimeNode,
@@ -398,6 +404,15 @@ export class ApiClient {
     return this.fetch("/auth/google", {
       method: "POST",
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    });
+  }
+
+  // Local mode auth (self-host only)
+  async localLogin(email?: string): Promise<LoginResponse> {
+    const body = email ? { email } : {};
+    return this.fetch("/auth/local-login", {
+      method: "POST",
+      body: JSON.stringify(body),
     });
   }
 
@@ -2099,5 +2114,34 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ token }),
     });
+  // Integrations (Linear / GitHub bidirectional sync)
+  async listIntegrations(): Promise<Integration[]> {
+    return this.fetch("/api/integrations");
+  }
+
+  async getIntegration(id: string): Promise<Integration> {
+    return this.fetch(`/api/integrations/${id}`);
+  }
+
+  async createIntegration(data: CreateIntegrationRequest): Promise<Integration> {
+    return this.fetch("/api/integrations", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateIntegration(id: string, data: UpdateIntegrationRequest): Promise<Integration> {
+    return this.fetch(`/api/integrations/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteIntegration(id: string): Promise<void> {
+    await this.fetch(`/api/integrations/${id}`, { method: "DELETE" });
+  }
+
+  async listExternalLinks(integrationId: string): Promise<ExternalIssueLink[]> {
+    return this.fetch(`/api/integrations/${integrationId}/links`);
   }
 }

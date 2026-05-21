@@ -159,3 +159,13 @@ export type {
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
 } from "./billing";
+
+export type {
+  Integration,
+  IntegrationProvider,
+  LinearIntegrationConfig,
+  GitHubIntegrationConfig,
+  CreateIntegrationRequest,
+  UpdateIntegrationRequest,
+  ExternalIssueLink,
+} from "./integration";
