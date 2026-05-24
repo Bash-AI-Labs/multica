@@ -34,7 +34,7 @@ COPY apps/web/ apps/web/
 COPY packages/ packages/
 
 # Re-link after source overlay (fixes any symlinks overwritten by COPY)
-RUN pnpm install --frozen-lockfile --offline
+RUN pnpm install --frozen-lockfile
 
 # Set build-time env: tells Next.js rewrites to proxy API calls to the backend service
 ARG REMOTE_API_URL=http://backend:8080
