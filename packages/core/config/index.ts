@@ -11,6 +11,7 @@ interface ConfigState {
   // must be hidden. Defaults to false so unknown / older servers behave like
   // the managed-cloud case.
   workspaceCreationDisabled: boolean;
+  localModeEnabled: boolean;
   setCdnDomain: (domain: string) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
@@ -21,6 +22,7 @@ interface ConfigState {
     daemonServerUrl?: string;
     daemonAppUrl?: string;
   }) => void;
+  setLocalModeEnabled: (enabled: boolean) => void;
 }
 
 export const configStore = createStore<ConfigState>((set) => ({
@@ -30,11 +32,13 @@ export const configStore = createStore<ConfigState>((set) => ({
   daemonServerUrl: "",
   daemonAppUrl: "",
   workspaceCreationDisabled: false,
+  localModeEnabled: false,
   setCdnDomain: (domain) => set({ cdnDomain: domain }),
   setAuthConfig: ({ allowSignup, googleClientId = "", workspaceCreationDisabled = false }) =>
     set({ allowSignup, googleClientId, workspaceCreationDisabled }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
+  setLocalModeEnabled: (enabled) => set({ localModeEnabled: enabled }),
 }));
 
 export function useConfigStore(): ConfigState;

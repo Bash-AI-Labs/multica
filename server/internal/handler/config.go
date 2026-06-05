@@ -28,6 +28,10 @@ type AppConfig struct {
 	DaemonServerURL string `json:"daemon_server_url,omitempty"`
 	DaemonAppURL    string `json:"daemon_app_url,omitempty"`
 
+	// LocalModeEnabled tells the web frontend that it can call /auth/local-login
+	// to auto-login when no valid session exists (self-hosted local deployments).
+	LocalModeEnabled bool `json:"local_mode_enabled,omitempty"`
+
 	// PostHog public config for the frontend. The key is the same Project
 	// API Key the backend uses; returning it here (instead of baking it
 	// into the frontend bundle via NEXT_PUBLIC_*) means self-hosted
@@ -47,6 +51,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		AllowSignup:               os.Getenv("ALLOW_SIGNUP") != "false",
 		GoogleClientID:            os.Getenv("GOOGLE_CLIENT_ID"),
 		WorkspaceCreationDisabled: os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
+		LocalModeEnabled:          localModeEnabled(),
 	}
 	if h.Storage != nil {
 		config.CdnDomain = h.Storage.CdnDomain()
