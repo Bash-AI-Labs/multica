@@ -2114,6 +2114,8 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ token }),
     });
+  }
+
   // Integrations (Linear / GitHub bidirectional sync)
   async listIntegrations(): Promise<Integration[]> {
     return this.fetch("/api/integrations");
