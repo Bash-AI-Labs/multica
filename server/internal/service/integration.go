@@ -131,7 +131,7 @@ func (s *IntegrationService) ImportExternalIssue(
 		CreatorID:     agent.ID,
 		ParentIssueID: pgtype.UUID{},
 		Position:      0,
-		DueDate:       pgtype.Timestamptz{},
+		DueDate:       pgtype.Date{},
 		Number:        issueNumber,
 		ProjectID:     pgtype.UUID{},
 	})
