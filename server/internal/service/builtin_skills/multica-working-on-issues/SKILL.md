@@ -70,6 +70,38 @@ In the final issue comment, include the PR URL when a PR exists. If the task did
 not produce a PR because no code changed or the user asked not to create one, say
 that explicitly.
 
+## Images and screenshots in comments
+
+**Never reference `raw.githubusercontent.com` URLs in Multica issue comments or
+PR descriptions.** Those URLs return 404 for private repos and break for anyone
+viewing the issue outside of GitHub.
+
+Instead, upload the file through the CLI and embed the returned `/uploads/...`
+URL in your markdown:
+
+```bash
+# Upload a local screenshot and get its Multica URL
+multica issue comment <issue-id> \
+  --body "Here is the result: ![screenshot](screenshot.png)" \
+  --attachment screenshot.png
+```
+
+The `--attachment` flag uploads the file to Multica's storage and rewrites the
+markdown image reference to the permanent `/uploads/...` path. This works for
+png, jpg, gif, webp, and svg files.
+
+If you need to attach an image without a comment, upload it first:
+
+```bash
+multica issue comment <issue-id> \
+  --body "![description](path/to/image.png)" \
+  --attachment path/to/image.png
+```
+
+Do **not** commit screenshots to the repo and link them — even on public repos
+the URLs are fragile (branch deletions, force-pushes, LFS pointer files). The
+upload endpoint is the only durable path.
+
 ## Reading a linked PR's real state
 
 When a step depends on PR state, query Multica's link table — do not infer it

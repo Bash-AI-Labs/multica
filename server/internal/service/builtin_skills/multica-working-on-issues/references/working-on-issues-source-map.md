@@ -122,6 +122,21 @@ line 2537).
 `--value` is JSON-parsed by default (bool/number sniff); `--type` forces
 `string`/`number`/`bool`.
 
+## Image/attachment upload
+
+| Behavior | File:line |
+|---|---|
+| `--attachment` flag on `issue create` | `server/cmd/multica/cmd_issue.go:298` |
+| `--attachment` flag on `issue comment add` | `server/cmd/multica/cmd_issue.go:354` |
+| Upload via `client.UploadFile` (POST `/api/upload-file`) | `server/cmd/multica/cmd_issue.go:749,1197` |
+| API route registration | `server/cmd/server/router.go:536` |
+| URL-shaped values skipped (no re-upload) | `server/cmd/multica/cmd_issue.go:619-625` |
+
+`--attachment` accepts local file paths only. The CLI reads the file, POSTs it
+to `/api/upload-file`, and the returned `/uploads/...` URL is linked to the
+issue/comment. Images in private repos at `raw.githubusercontent.com` return 404
+for unauthenticated viewers — always prefer the upload path.
+
 ## Verification command
 
 Re-derive any line above before depending on it:
@@ -134,4 +149,5 @@ grep -n 'func issuePullRequestRowToResponse\|type GitHubPullRequestResponse stru
 grep -n 'extractIdentifiers(\|extractClosingIdentifiers(\|derivePRState(' internal/handler/github.go
 grep -n 'prevIssue.Status == "backlog"\|func (h \*Handler) shouldEnqueueAgentTask' internal/handler/issue.go
 grep -n 'func notifyParentOfChildDone'       internal/handler/issue_child_done.go
+grep -n 'UploadFile\|--attachment'           cmd/multica/cmd_issue.go
 ```
