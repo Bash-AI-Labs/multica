@@ -431,6 +431,11 @@ var copilotBlockedArgs = map[string]blockedArgMode{
 	"--no-ask-user":     blockedStandalone,
 	"--resume":          blockedWithValue,  // managed via ExecOptions.ResumeSessionID
 	"--acp":             blockedStandalone, // prevent switching to ACP mode
+	// --effort/--reasoning-effort are owned by the per-agent thinking_level
+	// picker (buildCopilotArgs injects --effort only when opts.ThinkingLevel
+	// is set); blocking custom_args here keeps a single source of truth.
+	"--effort":           blockedWithValue,
+	"--reasoning-effort": blockedWithValue,
 }
 
 // buildCopilotArgs assembles the argv for a one-shot copilot invocation.
@@ -446,6 +451,12 @@ func buildCopilotArgs(prompt string, opts ExecOptions, logger *slog.Logger) []st
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
+	}
+	if opts.ThinkingLevel != "" {
+		// Per-agent reasoning effort (none|low|medium|high|xhigh|max). Slotted
+		// after --model so the launch line reads naturally in `agent command`
+		// logs; the CLI accepts the flag in any order.
+		args = append(args, "--effort", opts.ThinkingLevel)
 	}
 	if opts.ResumeSessionID != "" {
 		args = append(args, "--resume", opts.ResumeSessionID)

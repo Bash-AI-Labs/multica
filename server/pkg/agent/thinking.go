@@ -610,6 +610,17 @@ var providerThinkingEnums = map[string]map[string]bool{
 		"high":   true,
 		"xhigh":  true,
 	},
+	"copilot": {
+		// GitHub Copilot CLI `--effort` / `--reasoning-effort` vocabulary.
+		// Kept permissive (full superset); per-model/account gaps resolve at
+		// the daemon's pre-execution guard against the live ACP catalog.
+		"none":   true,
+		"low":    true,
+		"medium": true,
+		"high":   true,
+		"xhigh":  true,
+		"max":    true,
+	},
 }
 
 // IsKnownThinkingValue reports whether `value` is a recognised effort

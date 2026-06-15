@@ -291,7 +291,12 @@ func cursorStaticModels() []Model {
 // Source: https://docs.github.com/en/copilot/reference/ai-models/supported-models
 // IDs use the dotted form `copilot --model <id>` actually accepts.
 func copilotStaticModels() []Model {
-	return []Model{
+	// Reasoning-effort catalog mirrors what the Copilot ACP session advertises
+	// (configOptions.reasoning_effort → low|medium|high|max). Attached to every
+	// fallback entry so the reasoning picker still works when live discovery
+	// can't run; live discovery overrides this with the account's actual set.
+	thinking := copilotStaticThinking()
+	models := []Model{
 		// OpenAI
 		{ID: "gpt-5.5", Label: "GPT-5.5", Provider: "openai"},
 		{ID: "gpt-5.4", Label: "GPT-5.4", Provider: "openai"},
@@ -302,10 +307,31 @@ func copilotStaticModels() []Model {
 		{ID: "gpt-5-mini", Label: "GPT-5 mini", Provider: "openai"},
 		{ID: "gpt-4.1", Label: "GPT-4.1", Provider: "openai"},
 		// Anthropic
+		{ID: "claude-opus-4.8", Label: "Claude Opus 4.8", Provider: "anthropic"},
 		{ID: "claude-opus-4.7", Label: "Claude Opus 4.7", Provider: "anthropic"},
 		{ID: "claude-sonnet-4.6", Label: "Claude Sonnet 4.6", Provider: "anthropic"},
 		{ID: "claude-sonnet-4.5", Label: "Claude Sonnet 4.5", Provider: "anthropic"},
 		{ID: "claude-haiku-4.5", Label: "Claude Haiku 4.5", Provider: "anthropic"},
+	}
+	for i := range models {
+		cp := *thinking
+		cp.SupportedLevels = append([]ThinkingLevel(nil), thinking.SupportedLevels...)
+		models[i].Thinking = &cp
+	}
+	return models
+}
+
+// copilotStaticThinking is the fallback reasoning-effort catalog used when
+// live ACP discovery is unavailable. Levels match the Copilot CLI's
+// `--effort` / `--reasoning-effort` choices for reasoning-capable models.
+func copilotStaticThinking() *ModelThinking {
+	return &ModelThinking{
+		SupportedLevels: []ThinkingLevel{
+			{Value: "low", Label: "low", Description: "Minimal reasoning before responding."},
+			{Value: "medium", Label: "medium", Description: "Balanced reasoning and speed."},
+			{Value: "high", Label: "high", Description: "More thorough reasoning; slower responses."},
+			{Value: "max", Label: "max", Description: "Maximum reasoning; slowest but most thorough."},
+		},
 	}
 }
 
@@ -755,6 +781,7 @@ func discoverCopilotModels(ctx context.Context, executablePath string) ([]Model,
 		clientName:   "multica-model-discovery",
 		tmpdirPrefix: "multica-copilot-discovery-",
 		acpArgs:      []string{"--acp"},
+		annotate:     annotateCopilotReasoning,
 	})
 	if err != nil || len(models) == 0 {
 		return copilotStaticModels(), nil
@@ -765,6 +792,87 @@ func discoverCopilotModels(ctx context.Context, executablePath string) ([]Model,
 		}
 	}
 	return models, nil
+}
+
+// annotateCopilotReasoning attaches the Copilot session's reasoning-effort
+// catalog (advertised in the ACP `session/new` `configOptions` block, not in
+// `availableModels`) to every discovered model as its Thinking catalog. The
+// effort selector is session-level in Copilot — the same set of levels applies
+// regardless of which model is picked — so each model gets its own copy of the
+// catalog (a copy, not a shared pointer, so any future per-model trimming stays
+// isolated). No-op when the payload doesn't advertise a reasoning_effort option.
+func annotateCopilotReasoning(raw json.RawMessage, models []Model) {
+	mt := parseCopilotReasoningEffort(raw)
+	if mt == nil {
+		return
+	}
+	for i := range models {
+		if models[i].Thinking != nil {
+			continue
+		}
+		cp := *mt
+		cp.SupportedLevels = append([]ThinkingLevel(nil), mt.SupportedLevels...)
+		models[i].Thinking = &cp
+	}
+}
+
+// parseCopilotReasoningEffort extracts the `reasoning_effort` select from the
+// ACP `session/new` `configOptions` array. The Copilot CLI exposes it as:
+//
+//	"configOptions": [
+//	  {"id": "reasoning_effort", "category": "reasoning_effort",
+//	   "type": "select", "currentValue": "high",
+//	   "options": [{"value": "low", "name": "low", "description": "…"}, …]}
+//	]
+//
+// Values map to the CLI's `--effort` flag. Returns nil when no such option is
+// present (older CLI, model without reasoning control) so the model's Thinking
+// stays nil and the UI hides the picker.
+func parseCopilotReasoningEffort(raw json.RawMessage) *ModelThinking {
+	var resp struct {
+		ConfigOptions []struct {
+			ID           string `json:"id"`
+			Category     string `json:"category"`
+			CurrentValue string `json:"currentValue"`
+			Options      []struct {
+				Value       string `json:"value"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"options"`
+		} `json:"configOptions"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil
+	}
+	for _, c := range resp.ConfigOptions {
+		if c.ID != "reasoning_effort" && c.Category != "reasoning_effort" {
+			continue
+		}
+		levels := make([]ThinkingLevel, 0, len(c.Options))
+		for _, o := range c.Options {
+			v := strings.TrimSpace(o.Value)
+			if v == "" {
+				continue
+			}
+			label := strings.TrimSpace(o.Name)
+			if label == "" {
+				label = v
+			}
+			levels = append(levels, ThinkingLevel{
+				Value:       v,
+				Label:       label,
+				Description: strings.TrimSpace(o.Description),
+			})
+		}
+		if len(levels) == 0 {
+			return nil
+		}
+		return &ModelThinking{
+			SupportedLevels: levels,
+			DefaultLevel:    strings.TrimSpace(c.CurrentValue),
+		}
+	}
+	return nil
 }
 
 // acpDiscoveryProvider configures how discoverACPModels launches an
@@ -783,6 +891,12 @@ type acpDiscoveryProvider struct {
 	// acpArgs is the argv passed to the binary to start it in ACP
 	// server mode. Defaults to []string{"acp"} when nil/empty.
 	acpArgs []string
+	// annotate, when non-nil, runs against the raw session/new result and
+	// the freshly parsed model slice so a provider can enrich entries with
+	// data the shared parser doesn't model. Copilot uses it to attach its
+	// session-level reasoning-effort catalog (configOptions) as per-model
+	// Thinking; other ACP backends leave it nil and are unaffected.
+	annotate func(raw json.RawMessage, models []Model)
 }
 
 // discoverACPModels runs the ACP handshake for any agent CLI that
@@ -895,7 +1009,11 @@ func discoverACPModels(ctx context.Context, executablePath string, p acpDiscover
 			if env.ID.String() != "2" || len(env.Result) == 0 {
 				continue
 			}
-			done <- parseACPSessionNewModels(env.Result)
+			mdls := parseACPSessionNewModels(env.Result)
+			if p.annotate != nil {
+				p.annotate(env.Result, mdls)
+			}
+			done <- mdls
 			return
 		}
 	}()

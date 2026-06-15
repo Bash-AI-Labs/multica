@@ -836,3 +836,147 @@ func TestBuildCopilotArgsBlocksResumeAndACP(t *testing.T) {
 		}
 	}
 }
+
+// ── Reasoning-effort (thinking_level) wiring ──
+
+func TestBuildCopilotArgsWithThinkingLevel(t *testing.T) {
+	t.Parallel()
+
+	args := buildCopilotArgs("hi", ExecOptions{Model: "claude-sonnet-4.6", ThinkingLevel: "high"}, slog.Default())
+
+	var foundEffort, modelBeforeEffort bool
+	for i, a := range args {
+		if a == "--model" {
+			// --effort should come after --model in the launch line.
+			for j := i; j < len(args); j++ {
+				if args[j] == "--effort" {
+					modelBeforeEffort = true
+				}
+			}
+		}
+		if a == "--effort" {
+			if i+1 >= len(args) || args[i+1] != "high" {
+				t.Fatalf("expected --effort followed by high, got %v", args)
+			}
+			foundEffort = true
+		}
+	}
+	if !foundEffort {
+		t.Fatalf("expected --effort flag when ThinkingLevel is set, got %v", args)
+	}
+	if !modelBeforeEffort {
+		t.Fatalf("expected --effort to appear after --model, got %v", args)
+	}
+}
+
+func TestBuildCopilotArgsOmitsEffortWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	args := buildCopilotArgs("hi", ExecOptions{Model: "gpt-5.5"}, slog.Default())
+	for _, a := range args {
+		if a == "--effort" {
+			t.Fatalf("expected no --effort flag when ThinkingLevel is empty, got %v", args)
+		}
+	}
+}
+
+func TestBuildCopilotArgsBlocksEffortCustomArg(t *testing.T) {
+	t.Parallel()
+
+	// A user-supplied --effort in custom_args must be filtered so the
+	// per-agent thinking_level picker stays the single source of truth.
+	args := buildCopilotArgs("hi", ExecOptions{
+		CustomArgs: []string{"--effort", "max", "--reasoning-effort", "low"},
+	}, slog.Default())
+
+	for _, a := range args {
+		if a == "--effort" || a == "--reasoning-effort" || a == "max" {
+			t.Fatalf("blocked effort custom arg should have been filtered: %v", args)
+		}
+	}
+}
+
+func TestParseCopilotReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+	  "configOptions": [
+	    {"id":"model","category":"model","options":[{"value":"auto","name":"Auto"}]},
+	    {"id":"reasoning_effort","category":"reasoning_effort","type":"select","currentValue":"high",
+	     "options":[
+	       {"value":"low","name":"low","description":"Minimal reasoning before responding."},
+	       {"value":"medium","name":"medium","description":"Balanced reasoning and speed."},
+	       {"value":"high","name":"high","description":"More thorough reasoning; slower responses."},
+	       {"value":"max","name":"max","description":"Maximum reasoning; slowest but most thorough."}
+	     ]}
+	  ]
+	}`)
+
+	mt := parseCopilotReasoningEffort(raw)
+	if mt == nil {
+		t.Fatal("expected a ModelThinking, got nil")
+	}
+	if mt.DefaultLevel != "high" {
+		t.Fatalf("expected default level high, got %q", mt.DefaultLevel)
+	}
+	want := []string{"low", "medium", "high", "max"}
+	if len(mt.SupportedLevels) != len(want) {
+		t.Fatalf("expected %d levels, got %d: %+v", len(want), len(mt.SupportedLevels), mt.SupportedLevels)
+	}
+	for i, w := range want {
+		if mt.SupportedLevels[i].Value != w {
+			t.Fatalf("level[%d] = %q, want %q", i, mt.SupportedLevels[i].Value, w)
+		}
+	}
+}
+
+func TestParseCopilotReasoningEffortAbsent(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"configOptions":[{"id":"model","options":[]}]}`)
+	if mt := parseCopilotReasoningEffort(raw); mt != nil {
+		t.Fatalf("expected nil when reasoning_effort absent, got %+v", mt)
+	}
+}
+
+func TestAnnotateCopilotReasoningAttachesToAllModels(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"configOptions":[{"id":"reasoning_effort","currentValue":"high",
+	  "options":[{"value":"low","name":"low"},{"value":"high","name":"high"}]}]}`)
+	models := []Model{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	annotateCopilotReasoning(raw, models)
+	for _, m := range models {
+		if m.Thinking == nil || len(m.Thinking.SupportedLevels) != 2 {
+			t.Fatalf("model %q missing reasoning catalog: %+v", m.ID, m.Thinking)
+		}
+	}
+	// Catalogs must be independent copies, not a shared slice/pointer.
+	models[0].Thinking.SupportedLevels[0].Value = "mutated"
+	if models[1].Thinking.SupportedLevels[0].Value == "mutated" {
+		t.Fatal("reasoning catalogs should be independent copies per model")
+	}
+}
+
+func TestCopilotStaticModelsHaveReasoning(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range copilotStaticModels() {
+		if m.Thinking == nil || len(m.Thinking.SupportedLevels) == 0 {
+			t.Fatalf("static copilot model %q missing reasoning catalog", m.ID)
+		}
+	}
+}
+
+func TestCopilotIsKnownThinkingValue(t *testing.T) {
+	t.Parallel()
+
+	for _, v := range []string{"low", "medium", "high", "max", "xhigh", "none", ""} {
+		if !IsKnownThinkingValue("copilot", v) {
+			t.Fatalf("expected %q to be a known copilot thinking value", v)
+		}
+	}
+	if IsKnownThinkingValue("copilot", "bogus") {
+		t.Fatal("expected bogus to be rejected for copilot")
+	}
+}
