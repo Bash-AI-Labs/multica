@@ -105,6 +105,52 @@ func TestGitEnvPreservesExistingConfig(t *testing.T) {
 	}
 }
 
+// TestEnsureSafeGitConfigEnvOverridesInheritedExplicit guards the fix for the
+// daemon refusing to operate on its own bare caches when the inherited
+// environment sets safe.bareRepository=explicit (hardened shells / agent
+// sandboxes). EnsureSafeGitConfigEnv must append safe.bareRepository=all at a
+// higher GIT_CONFIG_* index and bump GIT_CONFIG_COUNT so git applies "all".
+func TestEnsureSafeGitConfigEnvOverridesInheritedExplicit(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+
+	EnsureSafeGitConfigEnv()
+
+	if got := os.Getenv("GIT_CONFIG_COUNT"); got != "3" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 3", got)
+	}
+	// Inherited explicit stays at index 0, but our override at index 2 wins.
+	if os.Getenv("GIT_CONFIG_KEY_2") != "safe.bareRepository" || os.Getenv("GIT_CONFIG_VALUE_2") != "all" {
+		t.Errorf("expected safe.bareRepository=all at index 2, got key=%q value=%q",
+			os.Getenv("GIT_CONFIG_KEY_2"), os.Getenv("GIT_CONFIG_VALUE_2"))
+	}
+	if os.Getenv("GIT_CONFIG_KEY_1") != "safe.directory" || os.Getenv("GIT_CONFIG_VALUE_1") != "*" {
+		t.Errorf("expected safe.directory=* at index 1, got key=%q value=%q",
+			os.Getenv("GIT_CONFIG_KEY_1"), os.Getenv("GIT_CONFIG_VALUE_1"))
+	}
+	// Inherited explicit entry must be preserved (overridden, not deleted).
+	if os.Getenv("GIT_CONFIG_KEY_0") != "safe.bareRepository" || os.Getenv("GIT_CONFIG_VALUE_0") != "explicit" {
+		t.Error("inherited GIT_CONFIG index 0 should be preserved")
+	}
+}
+
+// TestEnsureSafeGitConfigEnvNoInherited covers the clean-environment case.
+func TestEnsureSafeGitConfigEnvNoInherited(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "")
+	os.Unsetenv("GIT_CONFIG_COUNT")
+
+	EnsureSafeGitConfigEnv()
+
+	if got := os.Getenv("GIT_CONFIG_COUNT"); got != "2" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 2", got)
+	}
+	if os.Getenv("GIT_CONFIG_KEY_0") != "safe.directory" || os.Getenv("GIT_CONFIG_KEY_1") != "safe.bareRepository" {
+		t.Errorf("expected safe.directory at 0 and safe.bareRepository at 1, got %q / %q",
+			os.Getenv("GIT_CONFIG_KEY_0"), os.Getenv("GIT_CONFIG_KEY_1"))
+	}
+}
+
 func TestBareDirName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

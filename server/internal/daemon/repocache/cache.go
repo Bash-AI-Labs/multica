@@ -51,6 +51,40 @@ func gitEnv() []string {
 	)
 }
 
+// EnsureSafeGitConfigEnv normalizes the *current process* environment so every
+// git subprocess the daemon spawns — including the many cache/worktree commands
+// that don't route through gitEnv() — trusts the daemon's own repositories.
+//
+// It forces, via process-scoped GIT_CONFIG_* vars:
+//   - safe.directory=*        (ownership check is meaningless for daemon-owned dirs)
+//   - safe.bareRepository=all (git's permissive default)
+//
+// The second is the important one: a hardened shell or agent sandbox may export
+// safe.bareRepository=explicit, which makes git refuse any bare repo discovered
+// via `git -C <bare> …` without an explicit GIT_DIR. That breaks the repo cache
+// at the `git config remote.origin.fetch` step with "fatal: not in a git
+// directory", so clones/fetches/worktrees never succeed. Appending our values at
+// a higher GIT_CONFIG_* index overrides any inherited setting (last write wins).
+//
+// Call once during daemon startup, before any git command runs. Idempotent
+// enough for repeated calls (each adds two more entries), but not intended to
+// be hot-looped.
+func EnsureSafeGitConfigEnv() {
+	existing := 0
+	if v := os.Getenv("GIT_CONFIG_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			existing = n
+		}
+	}
+	idxDir := strconv.Itoa(existing)
+	idxBare := strconv.Itoa(existing + 1)
+	os.Setenv("GIT_CONFIG_KEY_"+idxDir, "safe.directory")
+	os.Setenv("GIT_CONFIG_VALUE_"+idxDir, "*")
+	os.Setenv("GIT_CONFIG_KEY_"+idxBare, "safe.bareRepository")
+	os.Setenv("GIT_CONFIG_VALUE_"+idxBare, "all")
+	os.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(existing+2))
+}
+
 var agentGitExcludePatterns = []string{".agent_context", "CLAUDE.md", "AGENTS.md", ".claude", ".opencode"}
 
 // RepoInfo describes a repository to cache.

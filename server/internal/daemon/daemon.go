@@ -604,6 +604,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cancelFunc = cancel
 	d.rootCtx = ctx
 
+	// Normalize git's safe.* config for the whole process so every git
+	// subprocess (repo cache clones/fetches, worktree ops) trusts the
+	// daemon's own repositories, even when launched from a hardened shell
+	// that exports safe.bareRepository=explicit.
+	repocache.EnsureSafeGitConfigEnv()
+
 	// Bind health port early to detect another running daemon.
 	healthLn, err := d.listenHealth()
 	if err != nil {
