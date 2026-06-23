@@ -76,6 +76,14 @@ services:
       FRONTEND_ORIGIN: ${TS_SCHEME:-https}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}
       CORS_ALLOWED_ORIGINS: ${TS_SCHEME:-https}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}
       MULTICA_APP_URL: ${TS_SCHEME:-https}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}
+      # Persist attachment markdown URLs as absolute, publicly-readable
+      # /uploads/<key> links on the funnel host (:8443). This makes images in
+      # issues/comments load on every client (web, desktop, mobile) and lets
+      # GitHub's camo proxy fetch images embedded in PRs/comments over the
+      # public funnel. Without this the backend falls back to the auth-gated
+      # /api/attachments/<id>/download path, which 401s for camo and renders
+      # broken images everywhere off the web origin.
+      LOCAL_UPLOAD_BASE_URL: ${TS_SCHEME:-https}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}:8443
       MULTICA_SERVER_URL: ${TS_WS_SCHEME:-wss}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}/ws
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
