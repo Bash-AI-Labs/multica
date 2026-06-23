@@ -84,6 +84,11 @@ services:
       # /api/attachments/<id>/download path, which 401s for camo and renders
       # broken images everywhere off the web origin.
       LOCAL_UPLOAD_BASE_URL: ${TS_SCHEME:-https}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}:8443
+      # Secret used to HMAC-sign /uploads/<key> media URLs. Public funnel reads
+      # are gated on a valid signature (see webhook-proxy + /uploads handler).
+      # Defaults to JWT_SECRET so signing is on by default; set explicitly to
+      # rotate media URLs independently of auth tokens.
+      MEDIA_SIGNING_SECRET: ${MEDIA_SIGNING_SECRET:-${JWT_SECRET}}
       MULTICA_SERVER_URL: ${TS_WS_SCHEME:-wss}://${TS_HOSTNAME:-hub}.${TS_TAILNET:-tail8d788f.ts.net}/ws
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}

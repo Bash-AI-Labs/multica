@@ -456,6 +456,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	if local, ok := store.(*storage.LocalStorage); ok {
 		r.Get("/uploads/*", func(w http.ResponseWriter, r *http.Request) {
 			file := strings.TrimPrefix(r.URL.Path, "/uploads/")
+			// Public reads arrive through the funnel webhook-proxy, which stamps
+			// X-Multica-Public. Those must carry a valid HMAC signature so the
+			// publicly-exposed media path can't be enumerated or hot-linked
+			// without a URL Multica minted. Trusted tailnet reads hit the
+			// backend directly (no header) and stay open, so existing unsigned
+			// in-app links keep working.
+			if r.Header.Get("X-Multica-Public") != "" && local.SignatureEnabled() {
+				if !local.VerifyKey(file, r.URL.Query().Get("sig")) {
+					http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+					return
+				}
+			}
 			local.ServeFile(w, r, file)
 		})
 	}

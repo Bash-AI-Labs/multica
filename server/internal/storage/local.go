@@ -2,6 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +19,12 @@ import (
 type LocalStorage struct {
 	uploadDir string
 	baseURL   string
+	// signSecret, when non-empty, enables HMAC-SHA256 signing of object URLs.
+	// Public (funnel) reads of /uploads/ are gated on a valid signature so the
+	// publicly-exposed media path can't be enumerated or hot-linked without a
+	// URL Multica minted; trusted tailnet reads stay open. See the /uploads
+	// handler in router.go and docker/webhook-proxy/nginx.conf.
+	signSecret []byte
 }
 
 // metaSuffix is the on-disk extension for the sidecar JSON file that
@@ -51,9 +60,50 @@ func NewLocalStorageFromEnv() *LocalStorage {
 
 	slog.Info("local storage initialized", "dir", uploadDir, "baseURL", baseURL)
 	return &LocalStorage{
-		uploadDir: uploadDir,
-		baseURL:   baseURL,
+		uploadDir:  uploadDir,
+		baseURL:    baseURL,
+		signSecret: []byte(os.Getenv("MEDIA_SIGNING_SECRET")),
 	}
+}
+
+// SignatureEnabled reports whether object URLs are HMAC-signed and the public
+// /uploads handler should enforce a valid signature on funnel traffic.
+func (s *LocalStorage) SignatureEnabled() bool { return len(s.signSecret) > 0 }
+
+// signKey returns the lowercase-hex HMAC-SHA256 of the storage key, or "" when
+// signing is disabled. The signature covers only the immutable object key, so
+// the resulting URL never expires — required for media embedded in permanent
+// GitHub PR/comment bodies that GitHub's camo proxy may re-fetch indefinitely.
+// Rotating MEDIA_SIGNING_SECRET invalidates every previously-issued URL.
+func (s *LocalStorage) signKey(key string) string {
+	if len(s.signSecret) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, s.signSecret)
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyKey reports whether sig is the valid signature for key. Constant-time.
+func (s *LocalStorage) VerifyKey(key, sig string) bool {
+	want := s.signKey(key)
+	if want == "" || sig == "" {
+		return false
+	}
+	return hmac.Equal([]byte(want), []byte(sig))
+}
+
+// objectURL builds the public URL for a stored key, appending the signature
+// query when signing is enabled.
+func (s *LocalStorage) objectURL(key string) string {
+	path := "/uploads/" + key
+	if sig := s.signKey(key); sig != "" {
+		path += "?sig=" + sig
+	}
+	if s.baseURL != "" {
+		return s.baseURL + path
+	}
+	return path
 }
 
 func (s *LocalStorage) CdnDomain() string {
@@ -68,6 +118,10 @@ func (s *LocalStorage) CdnDomain() string {
 }
 
 func (s *LocalStorage) KeyFromURL(rawURL string) string {
+	// Drop any query (e.g. the ?sig=… signature) before extracting the key.
+	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
+		rawURL = rawURL[:i]
+	}
 	if s.baseURL != "" && strings.HasPrefix(rawURL, s.baseURL) {
 		rawURL = strings.TrimPrefix(rawURL, s.baseURL)
 	}
@@ -146,10 +200,7 @@ func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, cont
 		}
 	}
 
-	if s.baseURL != "" {
-		return fmt.Sprintf("%s/uploads/%s", s.baseURL, key), nil
-	}
-	return fmt.Sprintf("/uploads/%s", key), nil
+	return s.objectURL(key), nil
 }
 
 func (s *LocalStorage) GetFilePath(key string) string {

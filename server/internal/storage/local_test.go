@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -516,5 +518,81 @@ func TestLocalStorage_GetReader_MissingKey(t *testing.T) {
 	if rc, err := store.GetReader(context.Background(), "nonexistent.txt"); err == nil {
 		rc.Close()
 		t.Fatal("GetReader should error on missing key")
+	}
+}
+
+func TestLocalStorage_SignedURLs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LOCAL_UPLOAD_DIR", tmpDir)
+	t.Setenv("LOCAL_UPLOAD_BASE_URL", "https://media.example.com:8443")
+	t.Setenv("MEDIA_SIGNING_SECRET", "test-secret")
+
+	store := NewLocalStorageFromEnv()
+	if store == nil {
+		t.Fatal("NewLocalStorageFromEnv returned nil")
+	}
+	if !store.SignatureEnabled() {
+		t.Fatal("SignatureEnabled() should be true when MEDIA_SIGNING_SECRET is set")
+	}
+
+	key := "workspaces/ws1/abc.png"
+	link, err := store.Upload(context.Background(), key, []byte("x"), "image/png", "abc.png")
+	if err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+
+	// URL must be absolute on the base host and carry a ?sig= signature.
+	if !strings.HasPrefix(link, "https://media.example.com:8443/uploads/"+key+"?sig=") {
+		t.Fatalf("signed link has unexpected shape: %q", link)
+	}
+
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("parse link: %v", err)
+	}
+	sig := u.Query().Get("sig")
+	if sig == "" {
+		t.Fatal("expected non-empty sig query param")
+	}
+
+	// The signature must validate for the key, and reject tampering.
+	if !store.VerifyKey(key, sig) {
+		t.Error("VerifyKey rejected the freshly-minted signature")
+	}
+	if store.VerifyKey(key, "deadbeef") {
+		t.Error("VerifyKey accepted a forged signature")
+	}
+	if store.VerifyKey("workspaces/ws1/other.png", sig) {
+		t.Error("VerifyKey accepted a signature bound to a different key")
+	}
+	if store.VerifyKey(key, "") {
+		t.Error("VerifyKey accepted an empty signature")
+	}
+
+	// KeyFromURL must strip the signature query so storage lookups resolve.
+	if got := store.KeyFromURL(link); got != key {
+		t.Errorf("KeyFromURL(%q) = %q, want %q", link, got, key)
+	}
+}
+
+func TestLocalStorage_SigningDisabledByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LOCAL_UPLOAD_DIR", tmpDir)
+	t.Setenv("LOCAL_UPLOAD_BASE_URL", "https://media.example.com")
+	t.Setenv("MEDIA_SIGNING_SECRET", "")
+
+	store := NewLocalStorageFromEnv()
+	if store == nil {
+		t.Fatal("NewLocalStorageFromEnv returned nil")
+	}
+	if store.SignatureEnabled() {
+		t.Fatal("SignatureEnabled() should be false with no MEDIA_SIGNING_SECRET")
+	}
+	link, err := store.Upload(context.Background(), "k.png", []byte("x"), "image/png", "k.png")
+	if err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+	if strings.Contains(link, "?sig=") {
+		t.Errorf("unsigned mode should not append a signature: %q", link)
 	}
 }
