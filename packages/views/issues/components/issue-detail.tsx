@@ -14,12 +14,14 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  Milestone,
   MoreHorizontal,
   PanelRight,
   Pin,
   PinOff,
   Plus,
   Tag,
+  Unlink,
   Users,
 } from "lucide-react";
 import { BreadcrumbHeader, type BreadcrumbSegment } from "../../layout/breadcrumb-header";
@@ -48,7 +50,8 @@ import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
 import { formatDateOnly } from "@multica/core/issues/date";
 import { useUpdateIssue } from "@multica/core/issues/mutations";
 import { toast } from "sonner";
-import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, StartDatePicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
+import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, StagePicker, StartDatePicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
+import { maxSiblingStage } from "./pickers/stage-picker";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
@@ -87,6 +90,8 @@ import { ProgressRing } from "./progress-ring";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 import { useT } from "../../i18n";
 import { useIssueDetailScrollRestore } from "../hooks/use-issue-detail-scroll-restore";
+import { useInPageFind } from "../hooks/use-in-page-find";
+import { FindBar } from "./find-bar";
 import {
   AnimatedRightSidebar,
   getAnimatedRightSidebarInitialOpen,
@@ -303,7 +308,11 @@ const EMPTY_REPLIES: TimelineEntry[] = [];
 // means appending here, wiring its row in the JSX switch below, and
 // adding a locale key. The picker, visibility rules, and add-property
 // menu all flow from this one list.
-const OPTIONAL_PROP_KEYS = ["priority", "start_date", "due_date", "labels"] as const;
+// `stage` is only meaningful for a sub-issue (relative to its siblings), so
+// its row and add-property entry are gated on `issue.parent_issue_id` at the
+// render site below — it stays in this list so seeding/visibility flow through
+// the same machinery as the other optional props.
+const OPTIONAL_PROP_KEYS = ["priority", "stage", "start_date", "due_date", "labels"] as const;
 type OptionalPropKey = (typeof OPTIONAL_PROP_KEYS)[number];
 
 function isOptionalPropSet(
@@ -314,6 +323,8 @@ function isOptionalPropSet(
   switch (key) {
     case "priority":
       return issue.priority !== "none";
+    case "stage":
+      return issue.stage !== null && issue.stage !== undefined;
     case "start_date":
       return !!issue.start_date;
     case "due_date":
@@ -321,6 +332,30 @@ function isOptionalPropSet(
     case "labels":
       return attachedLabelsCount > 0;
   }
+}
+
+// groupSubIssuesByStage orders a parent's children for display: staged groups
+// ascending by stage, then the unstaged group (stage === null) last. Callers
+// render a per-group stage header only when the set is actually staged.
+export function groupSubIssuesByStage(
+  children: Issue[],
+): { stage: number | null; items: Issue[] }[] {
+  const byStage = new Map<number, Issue[]>();
+  const unstaged: Issue[] = [];
+  for (const c of children) {
+    if (c.stage != null) {
+      const arr = byStage.get(c.stage);
+      if (arr) arr.push(c);
+      else byStage.set(c.stage, [c]);
+    } else {
+      unstaged.push(c);
+    }
+  }
+  const groups: { stage: number | null; items: Issue[] }[] = [...byStage.keys()]
+    .sort((a, b) => a - b)
+    .map((s) => ({ stage: s, items: byStage.get(s) as Issue[] }));
+  if (unstaged.length > 0) groups.push({ stage: null, items: unstaged });
+  return groups;
 }
 
 // Shallow array equality by element identity. Used to reuse the previous
@@ -994,6 +1029,22 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     [timelineView.groups, expandedResolved],
   );
 
+  // In-page find (Cmd/Ctrl+F). `items.length` is the content signal that
+  // triggers a match recompute when comments are added/removed; text edits
+  // are caught by the hook's own MutationObserver. Opening find forces the
+  // timeline to render flat below so every comment is in the DOM to match.
+  const find = useInPageFind({
+    container: scrollContainerEl,
+    contentKey: items.length,
+    enabled: !!issue,
+  });
+  // Close the bar (and drop highlights) when navigating to another issue —
+  // the web route reuses this component instead of remounting.
+  const closeFind = find.closeFind;
+  useEffect(() => {
+    closeFind();
+  }, [id, closeFind]);
+
   // ID of the trailing activity block — the only one expanded by default.
   const lastActivityGroupId = useMemo(() => {
     for (let i = timelineView.groups.length - 1; i >= 0; i--) {
@@ -1183,27 +1234,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       clearTimeout(fade);
     };
   }, [highlightCommentId, items, targetIdx, scrollContainerEl, replyToRoot, expandedResolved, timelineView, toggleResolvedExpand]);
-
-  // Cmd-F / Ctrl-F on a virtualized timeline only searches what's mounted in
-  // the viewport — off-screen comments are invisible to browser find-in-page.
-  // Intercept once per (session, issue) when the list is long enough that the
-  // user might actually try; let the keystroke pass through on short lists.
-  // Real fix is in-app search (separate PR); this is the toast stopgap.
-  useEffect(() => {
-    if (items.length <= 30) return;
-    const flagKey = `multica_cmdF_warned:${id}`;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== "f" || !(e.metaKey || e.ctrlKey)) return;
-      if (sessionStorage.getItem(flagKey)) return;
-      e.preventDefault();
-      sessionStorage.setItem(flagKey, "1");
-      toast.message(t(($) => $.detail.cmdf_toast_title), {
-        description: t(($) => $.detail.cmdf_toast_description),
-      });
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [id, items.length, t]);
 
   const descEditorRef = useRef<ContentEditorRef>(null);
   const { isDragOver: descDragOver, dropZoneProps: descDropZoneProps } = useFileDropZone({
@@ -1431,6 +1461,17 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               />
             </PropRow>
           )}
+          {issue.parent_issue_id != null && visibleOptionalProps.has("stage") && (
+            <PropRow label={t(($) => $.detail.prop_stage)}>
+              <StagePicker
+                stage={issue.stage}
+                onUpdate={handleUpdateField}
+                maxStage={maxSiblingStage(parentChildIssues)}
+                align="start"
+                defaultOpen={autoOpenProp === "stage"}
+              />
+            </PropRow>
+          )}
           {visibleOptionalProps.has("start_date") && (
             <PropRow label={t(($) => $.detail.prop_start_date)}>
               <StartDatePicker
@@ -1463,7 +1504,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               not yet displayed. Hidden once every optional field is on
               screen. Sits inside the same grid as a full-row, with its
               own padding so the visual rhythm follows the rows above. */}
-          {OPTIONAL_PROP_KEYS.some((k) => !visibleOptionalProps.has(k)) && (
+          {OPTIONAL_PROP_KEYS.some((k) => !visibleOptionalProps.has(k) && (k !== "stage" || issue.parent_issue_id != null)) && (
             <div className="col-span-2 mt-1">
               <Popover open={addPropPopoverOpen} onOpenChange={setAddPropPopoverOpen}>
                 <PopoverTrigger
@@ -1477,7 +1518,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                     icon the resulting picker uses, so the dropdown reads
                     as a preview of what will show up below. */}
                 <PopoverContent align="start" className="w-44 p-1">
-                  {OPTIONAL_PROP_KEYS.filter((k) => !visibleOptionalProps.has(k)).map((k) => (
+                  {OPTIONAL_PROP_KEYS.filter((k) => !visibleOptionalProps.has(k) && (k !== "stage" || issue.parent_issue_id != null)).map((k) => (
                     <button
                       key={k}
                       type="button"
@@ -1486,6 +1527,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                     >
                       {k === "priority" && (
                         <PriorityIcon priority="medium" inheritColor className="text-muted-foreground" />
+                      )}
+                      {k === "stage" && (
+                        <Milestone className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       )}
                       {k === "start_date" && (
                         <CalendarClock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1498,6 +1542,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                       )}
                       <span className="truncate">
                         {k === "priority" && t(($) => $.detail.prop_priority)}
+                        {k === "stage" && t(($) => $.detail.prop_stage)}
                         {k === "start_date" && t(($) => $.detail.prop_start_date)}
                         {k === "due_date" && t(($) => $.detail.prop_due_date)}
                         {k === "labels" && t(($) => $.detail.prop_labels)}
@@ -1526,14 +1571,25 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${parentIssueOpen ? "rotate-90" : ""}`} />
           </button>
           {parentIssueOpen && <div className="pl-2">
-            <AppLink
-              href={paths.issueDetail(parentIssue.id)}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 -mx-2 text-xs hover:bg-accent/50 transition-colors group"
-            >
-              <StatusIcon status={parentIssue.status} className="h-3.5 w-3.5 shrink-0" />
-              <span className="text-muted-foreground shrink-0">{parentIssue.identifier}</span>
-              <span className="truncate group-hover:text-foreground">{parentIssue.title}</span>
-            </AppLink>
+            <div className="flex items-center gap-0.5 rounded-md px-2 -mx-2 hover:bg-accent/50 transition-colors group">
+              <AppLink
+                href={paths.issueDetail(parentIssue.id)}
+                className="flex flex-1 min-w-0 items-center gap-1.5 py-1.5 text-xs"
+              >
+                <StatusIcon status={parentIssue.status} className="h-3.5 w-3.5 shrink-0" />
+                <span className="text-muted-foreground shrink-0">{parentIssue.identifier}</span>
+                <span className="truncate group-hover:text-foreground">{parentIssue.title}</span>
+              </AppLink>
+              <button
+                type="button"
+                title={t(($) => $.actions.remove_parent_issue)}
+                aria-label={t(($) => $.actions.remove_parent_issue)}
+                onClick={() => actions.removeParent()}
+                className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <Unlink className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>}
         </div>
       )}
@@ -1737,7 +1793,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       : [];
 
   const detailContent = (
-    <div className="flex h-full min-w-0 flex-1 flex-col">
+    <div className="relative flex h-full min-w-0 flex-1 flex-col">
+        {/* In-page find bar — floats over the top-right of the content column
+            (below the breadcrumb header), outside the scroll container so it
+            stays put while the timeline scrolls and its own text isn't walked. */}
+        {find.open && (
+          <FindBar find={find} className="absolute right-4 top-14 z-20" />
+        )}
         <BreadcrumbHeader
           segments={breadcrumbSegments}
           leaf={
@@ -1926,6 +1988,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               />
               <FileUploadButton
                 size="sm"
+                multiple
                 onSelect={(file) => descEditorRef.current?.uploadFile(file)}
               />
             </div>
@@ -2004,16 +2067,31 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
                 {/* Inline batch toolbar — appears next to the rows when
                     selections exist, instead of as a far-away fixed bar. */}
-                <BatchActionToolbar placement="inline" />
+                <BatchActionToolbar issues={childIssues} placement="inline" />
 
                 {/* List */}
-                {!subIssuesCollapsed && (
-                  <div className="overflow-hidden rounded-lg border bg-card/30 divide-y divide-border/60">
-                    {childIssues.map((child) => (
-                      <SubIssueRow key={child.id} child={child} />
-                    ))}
-                  </div>
-                )}
+                {!subIssuesCollapsed && (() => {
+                  const groups = groupSubIssuesByStage(childIssues);
+                  const staged = childIssues.some((c) => c.stage != null);
+                  return (
+                    <div className="overflow-hidden rounded-lg border bg-card/30 divide-y divide-border/60">
+                      {groups.map(({ stage: groupStage, items }) => (
+                        <Fragment key={groupStage ?? "unstaged"}>
+                          {staged && (
+                            <div className="bg-muted/40 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                              {groupStage == null
+                                ? t(($) => $.stage.none)
+                                : t(($) => $.stage.value, { n: groupStage })}
+                            </div>
+                          )}
+                          {items.map((child) => (
+                            <SubIssueRow key={child.id} child={child} />
+                          ))}
+                        </Fragment>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })()}
@@ -2098,6 +2176,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               //     proportional to items.length (markdown + lowlight per
               //     comment), which is acceptable in the deep-link case —
               //     the user has explicit intent to land on a specific item.
+              //   - `find.open` (in-page Cmd/Ctrl+F) → also render flat, so
+              //     every comment is in the DOM for the find walk to match
+              //     and highlight. Same explicit-intent cold-mount trade-off.
               //   - otherwise → Virtuoso. Browsing mode, virtualization
               //     wins on first-paint perf for long timelines.
               //
@@ -2105,7 +2186,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               // on a target" have fundamentally opposed contracts (estimated
               // heights vs real heights). Trying to satisfy both in one
               // path is what produced the bug history this PR closes.
-              !highlightCommentId ? (
+              !highlightCommentId && !find.open ? (
                 !scrollContainerEl ? (
                   // Skeleton while the callback ref populates so the gap
                   // between IssueDetail mount and Virtuoso mount doesn't

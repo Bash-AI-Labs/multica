@@ -9,8 +9,8 @@ import {
   useFileDropZone,
   FileDropOverlay,
 } from "../../editor";
-import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { SubmitButton } from "@multica/ui/components/common/submit-button";
+import { ChatAddMenu } from "./chat-add-menu";
 import { useChatStore, newSessionDraftKey } from "@multica/core/chat";
 import { createLogger } from "@multica/core/logger";
 import { enterKey, formatShortcut, modKey } from "@multica/core/platform";
@@ -75,12 +75,21 @@ interface ChatInputProps {
    *  surfaces a distinct placeholder. Kept separate from `disabled` so
    *  archived-session copy stays untouched. */
   noAgent?: boolean;
+  /** True when `disabled` is because the bound agent was archived (retired),
+   *  as opposed to the session itself being archived — swaps the placeholder
+   *  copy so the read-only reason reads accurately. */
+  agentArchived?: boolean;
   /** Name of the currently selected agent, used in the placeholder. */
   agentName?: string;
   /** Rendered at the bottom-left of the input bar — typically the agent picker. */
   leftAdornment?: ReactNode;
   /** Chat @ suggestions: current/recent issue/project entries. */
   contextItems?: MentionItem[];
+  /** Monotonic nonce bumped by the owner whenever the compose box should grab
+   *  keyboard focus — currently on "new chat" so the user can type right away.
+   *  0 (the initial value) is inert, so a plain deep-link open never steals
+   *  focus; only an explicit bump does. */
+  focusRequest?: number;
 }
 
 export function ChatInput({
@@ -92,9 +101,11 @@ export function ChatInput({
   isRunning,
   disabled,
   noAgent,
+  agentArchived,
   agentName,
   leftAdornment,
   contextItems,
+  focusRequest,
 }: ChatInputProps) {
   const { t } = useT("chat");
   const editorRef = useRef<ContentEditorRef>(null);
@@ -108,10 +119,15 @@ export function ChatInput({
   // mid-compose gives each agent its own draft. This is a STORAGE key, not
   // a React identity.
   //
-  // `editorKey` — React `key` on the ContentEditor. Used to force a
-  // remount when the user explicitly switches agent (so Tiptap's
-  // Placeholder, which only reads on mount, refreshes to "Tell {agent}…")
-  // or when a cancelled empty run restores a draft from the server.
+  // `editorKey` — React `key` on the ContentEditor. Forces a fresh editor
+  // instance when the user explicitly switches agent. Placeholder text itself
+  // no longer depends on this: ContentEditor's placeholder-sync effect
+  // refreshes it live (e.g. across archived ↔ active sessions of the SAME
+  // agent, where this key does not change). A cancelled-run draft restore
+  // does NOT bump this key either: it just writes
+  // the restored text into `inputDraft`, and the editor's own
+  // defaultValue-sync effect (content-editor.tsx) pushes it into the live
+  // instance. There is no second copy of the draft to drift or resurface.
   // Crucially this does NOT include `activeSessionId`: when the user
   // uploads a file in a brand-new chat, `handleUploadFile` first awaits
   // `ensureSession` which lazily creates the session and flips
@@ -134,14 +150,8 @@ export function ChatInput({
   const clearInputDraft = useChatStore((s) => s.clearInputDraft);
   const [isEmpty, setIsEmpty] = useState(!inputDraft.trim());
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [editorRestore, setEditorRestore] = useState<{
-    id: string;
-    content: string;
-    draftKey: string;
-  } | null>(null);
   const consumedRestoreIdRef = useRef<string | null>(null);
-  const activeRestore = editorRestore?.draftKey === draftKey ? editorRestore : null;
-  const editorKey = `${selectedAgentId ?? "no-agent"}:${activeRestore?.id ?? "base"}`;
+  const editorKey = selectedAgentId ?? "no-agent";
   // Number of in-flight uploads. We track this explicitly (rather than
   // peeking at the editor on every render) so the SubmitButton visibly
   // disables the instant an upload starts and re-enables the instant it
@@ -163,6 +173,15 @@ export function ChatInput({
   // `onSend` call would silently drop `attachment_ids` so the
   // attachment never binds to the chat message.
   const uploadMapRef = useRef<Map<string, string>>(new Map());
+
+  // Grab keyboard focus when the owner bumps `focusRequest` (a new chat was
+  // started) so the user can type immediately. The editor's `focus()` latches
+  // through to `onCreate` when it isn't mounted yet, so this works even on the
+  // first render of a freshly-mounted compose box. `0` is inert on purpose.
+  useEffect(() => {
+    if (!focusRequest) return;
+    editorRef.current?.focus();
+  }, [focusRequest]);
 
   useEffect(() => {
     if (!restoreDraftRequest) {
@@ -190,11 +209,6 @@ export function ChatInput({
     setInputDraft(draftKey, restoreDraftRequest.content);
     setInputDraftAttachments(draftKey, restoreDraftRequest.attachments ?? []);
     setIsEmpty(!restoreDraftRequest.content.trim());
-    setEditorRestore({
-      id: restoreDraftRequest.id,
-      content: restoreDraftRequest.content,
-      draftKey,
-    });
     onRestoreDraftConsumed?.();
   }, [
     draftKey,
@@ -328,7 +342,9 @@ export function ChatInput({
   const placeholder = noAgent
     ? t(($) => $.input.placeholder_no_agent)
     : disabled
-      ? t(($) => $.input.placeholder_archived)
+      ? agentArchived
+        ? t(($) => $.input.placeholder_archived_agent)
+        : t(($) => $.input.placeholder_archived)
       : agentName
         ? t(($) => $.input.placeholder_named, { name: agentName })
         : t(($) => $.input.placeholder_default);
@@ -366,7 +382,7 @@ export function ChatInput({
             // intentionally does not depend on activeSessionId.
             key={editorKey}
             ref={editorRef}
-            defaultValue={activeRestore?.content ?? inputDraft}
+            defaultValue={inputDraft}
             placeholder={placeholder}
             onUpdate={(md) => {
               setIsEmpty(!md.trim());
@@ -397,19 +413,19 @@ export function ChatInput({
             // continues a bullet list, leaving users stuck after one item.
           />
         </div>
-        {leftAdornment && (
-          <div className="absolute bottom-1.5 left-2 flex items-center">
+        {(uploadEnabled || leftAdornment) && (
+          <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1">
+            {uploadEnabled && (
+              <ChatAddMenu
+                onSelectFile={(file) => editorRef.current?.uploadFile(file)}
+              />
+            )}
             {leftAdornment}
           </div>
         )}
         <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
-          {uploadEnabled && (
-            <FileUploadButton
-              size="sm"
-              onSelect={(file) => editorRef.current?.uploadFile(file)}
-            />
-          )}
           <SubmitButton
+            shape="circle"
             onClick={handleSend}
             disabled={isEmpty || isSubmitting || !!disabled || !!noAgent || pendingUploads > 0}
             loading={isSubmitting}

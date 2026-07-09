@@ -48,3 +48,10 @@ export {
   useTimelineViewStore,
   type TimelineSortDirection,
 } from "./timeline-view-store";
+export {
+  ISSUE_SURFACE_VIEW_STORAGE_KEY,
+  getIssueSurfaceViewStore,
+  clearIssueSurfaceViewState,
+  pruneIssueSurfaceViewStates,
+  getIssueSurfaceViewStateRegistrySnapshot,
+} from "./surface-view-store";

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/runtimeapps"
 )
 
 // Sub-issue Creation section — after MUL-2538 the platform posts the
@@ -50,6 +52,12 @@ func TestSubIssueCreationSectionPresentForIssueRuns(t *testing.T) {
 				"`multica issue status <child-id> todo`",
 				"all `--status todo`",
 				"`--status backlog` from the start",
+				// Stage guidance must reach the always-on brief so agents
+				// reach for stages instead of only the manual backlog chain
+				// (MUL-3508 follow-up).
+				"**Ordering with stages.**",
+				"`--stage <N>`",
+				"`multica issue children <id>`",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("[%s] section missing %q", tc.name, want)
@@ -337,6 +345,75 @@ func TestInstructionPrecedenceOnlyAppliesToAssignmentWorkflow(t *testing.T) {
 	}
 }
 
+func TestChatOutputDoesNotRequireIssueComment(t *testing.T) {
+	t.Parallel()
+
+	out := buildMetaSkillContent("claude", TaskContextForEnv{ChatSessionID: "chat-1"})
+
+	for _, want := range []string{
+		"This is a chat session",
+		"Your reply is delivered directly to the chat window the user is reading",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("chat brief missing chat output guidance %q\n---\n%s", want, out)
+		}
+	}
+
+	for _, banned := range []string{
+		"Final results MUST be delivered via `multica issue comment add`",
+		"The user does NOT see your terminal output",
+		"do not call `multica issue comment add`",
+		"unless the user explicitly asks",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("chat brief must not inherit issue-comment output warning %q\n---\n%s", banned, out)
+		}
+	}
+}
+
+// The Output section for issue tasks must forbid mid-run progress
+// comments and require the single final result comment. Guards the
+// MUL-3605 regression where a review agent surfaced its progress
+// narration as the result instead of posting a conclusion. (The
+// pre-existing "Final results MUST be delivered … invisible without it"
+// and "state the outcome, not the process" lines already carry the
+// mandatory-comment and no-process-dump halves.) Chat / quick-create /
+// autopilot kinds keep their own delivery channels and must NOT inherit
+// this rule. Runs both the legacy and slim paths.
+func TestOutputForbidsMidRunProgressComments(t *testing.T) {
+	wantPhrases := []string{
+		"Post exactly ONE comment per run",
+		"Do NOT post progress updates",
+	}
+	issueCtxs := map[string]TaskContextForEnv{
+		"assignment": {IssueID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		"comment":    {IssueID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TriggerCommentID: "tc-1"},
+	}
+
+	run := func(t *testing.T, label string) {
+		for name, ctx := range issueCtxs {
+			out := buildMetaSkillContent("claude", ctx)
+			for _, want := range wantPhrases {
+				if !strings.Contains(out, want) {
+					t.Errorf("%s/%s brief missing output rule %q\n---\n%s", label, name, want, out)
+				}
+			}
+		}
+		// Chat keeps its own delivery channel; it must not inherit the
+		// issue-task "post a final comment" rules.
+		chat := buildMetaSkillContent("claude", TaskContextForEnv{ChatSessionID: "chat-1"})
+		for _, banned := range wantPhrases {
+			if strings.Contains(chat, banned) {
+				t.Errorf("%s chat brief must not inherit issue output rule %q", label, banned)
+			}
+		}
+	}
+
+	// The `runtime_brief_slim` flag was retired (MUL-4297); there is now a
+	// single brief.
+	run(t, "brief")
+}
+
 // The sub-issue creation rule must reach top-level parents that have no
 // `parent_issue_id` of their own — that is where the `todo` vs `backlog`
 // decision matters most. The section must not gate on this issue being
@@ -472,6 +549,48 @@ func TestWorkspaceContextHeadingSkippedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestConnectedAppsRenderedAcrossBriefModes(t *testing.T) {
+	ctx := TaskContextForEnv{
+		IssueID:          "11111111-2222-3333-4444-555555555555",
+		WorkspaceContext: "Prefer source-of-truth systems.",
+		ConnectedApps: []runtimeapps.ConnectedApp{{
+			Provider:    "composio",
+			ServerName:  "composio",
+			ToolkitSlug: "notion",
+			ToolkitName: "Notion",
+		}},
+	}
+
+	run := func(t *testing.T, label string) {
+		out := buildMetaSkillContent("claude", ctx)
+		for _, want := range []string{
+			"## Connected Apps",
+			"- Notion (`notion`) via MCP server `composio`",
+			"Use the listed MCP server when the task asks to read or act in one of these apps.",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s brief missing connected app text %q\n---\n%s", label, want, out)
+			}
+		}
+		wsIdx := strings.Index(out, "## Workspace Context")
+		appIdx := strings.Index(out, "## Connected Apps")
+		cmdIdx := strings.Index(out, "## Available Commands")
+		if wsIdx == -1 || appIdx == -1 || cmdIdx == -1 || !(wsIdx < appIdx && appIdx < cmdIdx) {
+			t.Fatalf("%s connected apps should sit between workspace context and available commands (ws=%d app=%d cmd=%d)", label, wsIdx, appIdx, cmdIdx)
+		}
+	}
+
+	run(t, "brief")
+}
+
+func TestConnectedAppsHeadingSkippedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	out := buildMetaSkillContent("claude", TaskContextForEnv{IssueID: "11111111-2222-3333-4444-555555555555"})
+	if strings.Contains(out, "## Connected Apps") {
+		t.Fatalf("empty connected apps must not emit the heading")
+	}
+}
+
 func TestSubIssueCreationSectionSkippedForNonIssueModes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -504,7 +623,7 @@ func TestSubIssueCreationSectionSkippedForNonIssueModes(t *testing.T) {
 }
 
 // writeRuntimeConfigFile is the safe replacement for the previous
-// unconditional os.WriteFile of CLAUDE.md / AGENTS.md / GEMINI.md. The three
+// unconditional os.WriteFile of CLAUDE.md / AGENTS.md. The two
 // states it must handle correctly are: file missing, file present without
 // markers (user-authored content already there — the regression case from
 // MUL-2753), and file present with markers (idempotent second-run replace).
@@ -667,7 +786,6 @@ func TestInjectRuntimeConfigPreservesUserContent(t *testing.T) {
 		{"kimi", "AGENTS.md"},
 		{"kiro", "AGENTS.md"},
 		{"antigravity", "AGENTS.md"},
-		{"gemini", "GEMINI.md"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -710,7 +828,7 @@ func TestInjectRuntimeConfigUnknownProviderSkipsWrite(t *testing.T) {
 	dir := t.TempDir()
 	// Seed all three candidate filenames so we can verify none of them get
 	// written when the provider is unknown.
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("untouched\n"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
 		}
@@ -721,7 +839,7 @@ func TestInjectRuntimeConfigUnknownProviderSkipsWrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InjectRuntimeConfig: %v", err)
 	}
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -878,7 +996,7 @@ func TestCleanupRuntimeConfigPreservesUserContent(t *testing.T) {
 
 // Cleanup removes the file entirely when the marker block was the only
 // content — i.e. we created the file from scratch in a directory that had
-// no pre-existing CLAUDE.md / AGENTS.md / GEMINI.md.
+// no pre-existing CLAUDE.md / AGENTS.md.
 func TestCleanupRuntimeConfigRemovesFileWhenOnlyBlockRemained(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -943,7 +1061,7 @@ func TestCleanupRuntimeConfigNoOpCases(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		// Seed every candidate filename to verify none of them get touched.
-		for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+		for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("untouched\n"), 0o644); err != nil {
 				t.Fatalf("seed %s: %v", name, err)
 			}
@@ -951,7 +1069,7 @@ func TestCleanupRuntimeConfigNoOpCases(t *testing.T) {
 		if err := CleanupRuntimeConfig(dir, "totally-unknown-provider"); err != nil {
 			t.Errorf("unknown provider must be no-op, got: %v", err)
 		}
-		for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+		for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 			got, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
 				t.Fatalf("read %s: %v", name, err)
@@ -1016,7 +1134,6 @@ func TestCleanupRuntimeConfigByProvider(t *testing.T) {
 		{"kimi", "AGENTS.md"},
 		{"kiro", "AGENTS.md"},
 		{"antigravity", "AGENTS.md"},
-		{"gemini", "GEMINI.md"},
 	}
 	for _, tc := range cases {
 		tc := tc

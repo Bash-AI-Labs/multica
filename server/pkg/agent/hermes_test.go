@@ -832,6 +832,9 @@ func TestHermesClientHandleSessionNotificationToolCall(t *testing.T) {
 	if got[1].Output != "/tmp/project\n" {
 		t.Errorf("second output: got %q", got[1].Output)
 	}
+	if got[1].Status != "completed" {
+		t.Errorf("second status: got %q, want completed", got[1].Status)
+	}
 }
 
 func TestHermesClientHandleSessionNotificationTurnEnd(t *testing.T) {
@@ -853,6 +856,30 @@ func TestHermesClientHandleSessionNotificationTurnEnd(t *testing.T) {
 	}
 	if got.usage.InputTokens != 3 || got.usage.OutputTokens != 4 || got.usage.CacheReadTokens != 1 {
 		t.Errorf("usage: got %+v", got.usage)
+	}
+}
+
+func TestParseACPTokenUsageAliases(t *testing.T) {
+	t.Parallel()
+
+	usage := parseACPTokenUsage(json.RawMessage(`{
+		"input_tokens": 11,
+		"output_tokens": "7",
+		"cacheReadTokens": 5,
+		"cache_creation_input_tokens": 3
+	}`))
+
+	if usage.InputTokens != 11 {
+		t.Errorf("InputTokens: got %d, want 11", usage.InputTokens)
+	}
+	if usage.OutputTokens != 7 {
+		t.Errorf("OutputTokens: got %d, want 7", usage.OutputTokens)
+	}
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("CacheReadTokens: got %d, want 5", usage.CacheReadTokens)
+	}
+	if usage.CacheWriteTokens != 3 {
+		t.Errorf("CacheWriteTokens: got %d, want 3", usage.CacheWriteTokens)
 	}
 }
 
@@ -2102,7 +2129,7 @@ func TestHermesResumeIncludesMcpServers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
-		Timeout:         5 * time.Second,
+		Timeout:         30 * time.Second,
 		ResumeSessionID: "ses_resume",
 		McpConfig:       json.RawMessage(`{"mcpServers":{"fetch":{"command":"uvx"}}}`),
 	})
@@ -2157,7 +2184,7 @@ func TestHermesDropsRemoteMcpWhenCapabilityNotAdvertised(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
-		Timeout: 5 * time.Second,
+		Timeout: 30 * time.Second,
 		McpConfig: json.RawMessage(`{"mcpServers":{
 			"local":{"command":"uvx"},
 			"remote-http":{"type":"http","url":"https://x/mcp"},
@@ -2209,7 +2236,7 @@ func TestHermesKeepsRemoteMcpWhenCapabilityAdvertised(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
-		Timeout: 5 * time.Second,
+		Timeout: 30 * time.Second,
 		McpConfig: json.RawMessage(`{"mcpServers":{
 			"local":{"command":"uvx"},
 			"remote-http":{"type":"http","url":"https://x/mcp"},

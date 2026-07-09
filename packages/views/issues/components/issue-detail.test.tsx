@@ -234,7 +234,6 @@ vi.mock("@multica/core/api", () => ({
 // Mock issue config
 vi.mock("@multica/core/issues/config", () => ({
   ALL_STATUSES: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
-  BOARD_STATUSES: ["backlog", "todo", "in_progress", "in_review", "done", "blocked"],
   STATUS_ORDER: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
   STATUS_CONFIG: {
     backlog: { label: "Backlog", iconColor: "text-muted-foreground", hoverBg: "hover:bg-accent" },
@@ -311,8 +310,9 @@ vi.mock("@multica/core/issues/stores", () => ({
 // scrollIntoView (it drives the timeline container's scrollTop directly to
 // avoid scrolling ancestor overflow:hidden boxes — see issue-detail.tsx). We
 // keep a no-op stub on the prototype so any stray scrollIntoView call from
-// other components doesn't throw; deep-link tests assert the highlight ring
-// instead, which is mechanism-independent and observable without layout.
+// other components doesn't throw; deep-link tests assert the highlight
+// background instead, which is mechanism-independent and observable without
+// layout.
 const scrollIntoViewSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("react-virtuoso", () => ({
@@ -404,6 +404,7 @@ const mockIssue: Issue = {
   parent_issue_id: null,
   project_id: null,
   position: 0,
+  stage: null,
   start_date: null,
   due_date: "2026-06-01T00:00:00Z",
   metadata: {},
@@ -440,7 +441,7 @@ const mockTimeline: TimelineEntry[] = [
 // Import component under test (after mocks)
 // ---------------------------------------------------------------------------
 
-import { IssueDetail } from "./issue-detail";
+import { IssueDetail, groupSubIssuesByStage } from "./issue-detail";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -488,6 +489,21 @@ function renderIssueDetailWithHighlight(
     </I18nProvider>,
   );
   return { ...result, queryClient };
+}
+
+const highlightedCommentBackgroundClass =
+  "bg-[color-mix(in_srgb,var(--card)_95%,var(--brand)_5%)]";
+
+function hasHighlightedCommentBackground(root: ParentNode | null): boolean {
+  if (!root) return false;
+
+  const elements = root instanceof Element
+    ? [root, ...Array.from(root.querySelectorAll("[class]"))]
+    : Array.from(root.querySelectorAll("[class]"));
+
+  return elements.some(
+    (el) => typeof el.className === "string" && el.className.includes(highlightedCommentBackgroundClass),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,12 +1127,54 @@ describe("IssueDetail (shared)", () => {
       // The deep-link effect lands on AND highlights the target comment: it
       // drives the timeline container's scrollTop directly (jsdom has no
       // layout, so the scroll itself isn't observable here) and applies the
-      // brand highlight ring. Assert the user-facing highlight.
+      // brand highlight background. Assert the user-facing highlight.
       await waitFor(() => {
         expect(
-          document.getElementById("comment-comment-2")?.querySelector(".ring-2"),
-        ).not.toBeNull();
+          hasHighlightedCommentBackground(document.getElementById("comment-comment-2")),
+        ).toBe(true);
       });
+    });
+
+    it("highlights only the target root comment, not the whole thread", async () => {
+      mockApiObj.listTimeline.mockResolvedValue([
+        {
+          type: "comment",
+          id: "comment-root",
+          actor_type: "member",
+          actor_id: "user-1",
+          content: "Root target",
+          parent_id: null,
+          created_at: "2026-01-18T00:00:00Z",
+          updated_at: "2026-01-18T00:00:00Z",
+          comment_type: "comment",
+        } as TimelineEntry,
+        {
+          type: "comment",
+          id: "reply-under-root",
+          actor_type: "member",
+          actor_id: "user-1",
+          content: "Reply should stay neutral",
+          parent_id: "comment-root",
+          created_at: "2026-01-18T01:00:00Z",
+          updated_at: "2026-01-18T01:00:00Z",
+          comment_type: "comment",
+        } as TimelineEntry,
+      ]);
+
+      renderIssueDetailWithHighlight("comment-root");
+
+      await waitFor(() => {
+        expect(document.getElementById("comment-comment-root")).not.toBeNull();
+      });
+      await waitFor(() => {
+        expect(
+          hasHighlightedCommentBackground(document.getElementById("comment-comment-root")),
+        ).toBe(true);
+      });
+
+      const reply = document.getElementById("comment-reply-under-root");
+      expect(reply).not.toBeNull();
+      expect(hasHighlightedCommentBackground(reply)).toBe(false);
     });
 
     it("still scrolls when the timeline is ready before the issue (regression for inbox click)", async () => {
@@ -1137,7 +1195,7 @@ describe("IssueDetail (shared)", () => {
         document.getElementById("comment-comment-2"),
       ).toBeNull();
       // Nothing highlighted while the loading skeleton is up.
-      expect(document.querySelector(".ring-2")).toBeNull();
+      expect(hasHighlightedCommentBackground(document)).toBe(false);
 
       resolveIssue(mockIssue);
 
@@ -1148,8 +1206,8 @@ describe("IssueDetail (shared)", () => {
       });
       await waitFor(() => {
         expect(
-          document.getElementById("comment-comment-2")?.querySelector(".ring-2"),
-        ).not.toBeNull();
+          hasHighlightedCommentBackground(document.getElementById("comment-comment-2")),
+        ).toBe(true);
       });
     });
 
@@ -1229,5 +1287,38 @@ describe("IssueDetail (shared)", () => {
         expect.objectContaining({ description: "" }),
       );
     });
+  });
+});
+
+describe("groupSubIssuesByStage", () => {
+  const child = (id: string, stage: number | null): Issue => ({
+    ...mockIssue,
+    id,
+    parent_issue_id: "parent-1",
+    stage,
+  });
+
+  it("returns a single null-stage group when nothing is staged", () => {
+    const groups = groupSubIssuesByStage([child("a", null), child("b", null)]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.stage).toBeNull();
+    expect(groups[0]?.items.map((i) => i.id)).toEqual(["a", "b"]);
+  });
+
+  it("orders staged groups ascending with the unstaged group last", () => {
+    const groups = groupSubIssuesByStage([
+      child("s2", 2),
+      child("u", null),
+      child("s1a", 1),
+      child("s1b", 1),
+    ]);
+    expect(groups.map((g) => g.stage)).toEqual([1, 2, null]);
+    expect(groups[0]?.items.map((i) => i.id)).toEqual(["s1a", "s1b"]);
+    expect(groups[2]?.items.map((i) => i.id)).toEqual(["u"]);
+  });
+
+  it("omits the unstaged group when every child is staged", () => {
+    const groups = groupSubIssuesByStage([child("s1", 1), child("s2", 2)]);
+    expect(groups.map((g) => g.stage)).toEqual([1, 2]);
   });
 });

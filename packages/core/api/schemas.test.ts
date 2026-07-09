@@ -4,8 +4,13 @@ import {
   DashboardAgentRunTimeListSchema,
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
+  CreateFeedbackResponseSchema,
   DuplicateIssueErrorBodySchema,
+  EMPTY_CREATE_FEEDBACK_RESPONSE,
+  EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_USER,
+  InboxUnreadSummarySchema,
+  IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -34,6 +39,7 @@ const baseIssue = {
   parent_issue_id: null,
   project_id: null,
   position: 0,
+  stage: null,
   start_date: null,
   due_date: null,
   metadata: {},
@@ -74,6 +80,93 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
     };
     expect(ListIssuesResponseSchema.safeParse(payload).success).toBe(false);
   });
+
+  it("accepts a numeric stage", () => {
+    const payload = { issues: [{ ...baseIssue, stage: 2 }], total: 1 };
+    const parsed = ListIssuesResponseSchema.parse(payload);
+    expect(parsed.issues[0]?.stage).toBe(2);
+  });
+
+  it("defaults stage to null when the server omits it (older backend)", () => {
+    const { stage: _omit, ...issueWithoutStage } = baseIssue;
+    const payload = { issues: [issueWithoutStage], total: 1 };
+    const parsed = ListIssuesResponseSchema.parse(payload);
+    expect(parsed.issues[0]?.stage).toBeNull();
+  });
+});
+
+// POST /api/issues/preview-trigger feeds this schema through parseWithFallback
+// in client.previewIssueTrigger with fallback { triggers: [], total_count: 0 }
+// (MUL-3375). The four entry points read it to decide "will this start a run",
+// so malformed / missing / null drift must degrade to "nothing will start"
+// rather than throw into the picker/modal.
+const PREVIEW_FALLBACK = { triggers: [], total_count: 0 };
+const PREVIEW_ENDPOINT = { endpoint: "POST /api/issues/preview-trigger" };
+
+describe("IssueTriggerPreviewSchema", () => {
+  it("parses a well-formed response", () => {
+    const parsed = IssueTriggerPreviewSchema.parse({
+      triggers: [
+        { issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true },
+        { issue_id: "i2", agent_id: "a2", source: "status", handoff_supported: false },
+      ],
+      total_count: 2,
+    });
+    expect(parsed.total_count).toBe(2);
+    expect(parsed.triggers).toHaveLength(2);
+    expect(parsed.triggers[0]).toMatchObject({ issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true });
+  });
+
+  it("defaults missing top-level fields (empty / older backend)", () => {
+    const parsed = IssueTriggerPreviewSchema.parse({});
+    expect(parsed.triggers).toEqual([]);
+    expect(parsed.total_count).toBe(0);
+  });
+
+  it("defaults missing optional item fields, keeping required issue_id", () => {
+    const parsed = IssueTriggerPreviewSchema.parse({ triggers: [{ issue_id: "i1" }], total_count: 1 });
+    expect(parsed.triggers[0]).toEqual({
+      issue_id: "i1",
+      agent_id: "",
+      source: "",
+      handoff_supported: false,
+    });
+  });
+
+  it("parseWithFallback returns the fallback for a malformed shape (triggers not an array)", () => {
+    const parsed = parseWithFallback(
+      { triggers: "nope", total_count: 1 },
+      IssueTriggerPreviewSchema,
+      PREVIEW_FALLBACK,
+      PREVIEW_ENDPOINT,
+    );
+    expect(parsed).toEqual(PREVIEW_FALLBACK);
+  });
+
+  it("parseWithFallback returns the fallback when an item drops the required issue_id", () => {
+    const parsed = parseWithFallback(
+      { triggers: [{ agent_id: "a1", source: "assign" }], total_count: 1 },
+      IssueTriggerPreviewSchema,
+      PREVIEW_FALLBACK,
+      PREVIEW_ENDPOINT,
+    );
+    expect(parsed).toEqual(PREVIEW_FALLBACK);
+  });
+
+  it("parseWithFallback returns the fallback for a wrong-typed total_count", () => {
+    const parsed = parseWithFallback(
+      { triggers: [], total_count: "5" },
+      IssueTriggerPreviewSchema,
+      PREVIEW_FALLBACK,
+      PREVIEW_ENDPOINT,
+    );
+    expect(parsed).toEqual(PREVIEW_FALLBACK);
+  });
+
+  it("parseWithFallback returns the fallback for null / non-object bodies", () => {
+    expect(parseWithFallback(null, IssueTriggerPreviewSchema, PREVIEW_FALLBACK, PREVIEW_ENDPOINT)).toEqual(PREVIEW_FALLBACK);
+    expect(parseWithFallback("oops", IssueTriggerPreviewSchema, PREVIEW_FALLBACK, PREVIEW_ENDPOINT)).toEqual(PREVIEW_FALLBACK);
+  });
 });
 
 describe("TimelineEntriesSchema", () => {
@@ -92,6 +185,38 @@ describe("TimelineEntriesSchema", () => {
     ]);
 
     expect(parsed[0]?.source_task_id).toBe("task-1");
+  });
+});
+
+describe("CreateFeedbackResponseSchema", () => {
+  const ENDPOINT = { endpoint: "POST /api/feedback" };
+
+  it("parses a well-formed response and preserves extra fields", () => {
+    const parsed = parseWithFallback(
+      { id: "feedback-1", created_at: "2026-06-26T00:00:00Z", future_field: true },
+      CreateFeedbackResponseSchema,
+      EMPTY_CREATE_FEEDBACK_RESPONSE,
+      ENDPOINT,
+    );
+    expect(parsed).toMatchObject({
+      id: "feedback-1",
+      created_at: "2026-06-26T00:00:00Z",
+      future_field: true,
+    });
+  });
+
+  it("returns the empty fallback for malformed feedback responses", () => {
+    expect(
+      parseWithFallback(
+        { id: 123, created_at: "2026-06-26T00:00:00Z" },
+        CreateFeedbackResponseSchema,
+        EMPTY_CREATE_FEEDBACK_RESPONSE,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_CREATE_FEEDBACK_RESPONSE);
+    expect(
+      parseWithFallback(null, CreateFeedbackResponseSchema, EMPTY_CREATE_FEEDBACK_RESPONSE, ENDPOINT),
+    ).toBe(EMPTY_CREATE_FEEDBACK_RESPONSE);
   });
 });
 
@@ -324,5 +449,63 @@ describe("AppConfigSchema cdn_signed drift", () => {
   it("keeps cdn_signed=true from a signing-enabled server", () => {
     const parsed = AppConfigSchema.parse({ cdn_signed: true });
     expect(parsed.cdn_signed).toBe(true);
+  });
+
+  it("parses frontend feature flag decisions", () => {
+    const parsed = AppConfigSchema.parse({
+      feature_flags: {
+        composio_mcp_apps: true,
+        malformed_future_flag: "yes",
+      },
+    });
+    expect(parsed.feature_flags).toEqual({
+      composio_mcp_apps: true,
+      malformed_future_flag: false,
+    });
+  });
+
+  it("defaults malformed feature_flags to an empty object", () => {
+    const parsed = AppConfigSchema.parse({ feature_flags: ["not", "an", "object"] });
+    expect(parsed.feature_flags).toEqual({});
+  });
+});
+
+describe("InboxUnreadSummarySchema", () => {
+  const ENDPOINT = { endpoint: "GET /api/inbox/unread-summary" };
+
+  it("parses a well-formed summary and tolerates extra fields", () => {
+    const parsed = parseWithFallback(
+      [
+        { workspace_id: "ws-1", count: 2 },
+        { workspace_id: "ws-2", count: 0, future_field: "ignored" },
+      ],
+      InboxUnreadSummarySchema,
+      EMPTY_INBOX_UNREAD_SUMMARY,
+      ENDPOINT,
+    );
+    expect(parsed).toEqual([
+      { workspace_id: "ws-1", count: 2 },
+      { workspace_id: "ws-2", count: 0, future_field: "ignored" },
+    ]);
+  });
+
+  it("returns the empty fallback (dot hidden) for a non-array body", () => {
+    expect(
+      parseWithFallback({ rows: [] }, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, ENDPOINT),
+    ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
+    expect(
+      parseWithFallback(null, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, ENDPOINT),
+    ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
+  });
+
+  it("returns the empty fallback when an entry has a wrong-typed count", () => {
+    expect(
+      parseWithFallback(
+        [{ workspace_id: "ws-1", count: "lots" }],
+        InboxUnreadSummarySchema,
+        EMPTY_INBOX_UNREAD_SUMMARY,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
   });
 });

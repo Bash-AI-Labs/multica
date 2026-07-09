@@ -81,7 +81,7 @@ func BuildResumedCommentsHint(issueID, triggerCommentID, triggerThreadID string)
 // timeline (oldest-first, server cap 2000), point the agent at the triggering
 // CONVERSATION: `--thread <trigger> --tail 30` returns that thread's root plus
 // its 30 newest replies (root is always included, even at --tail 0) — the
-// context the triggering comment actually needs. A `--recent 20` pointer is kept
+// context the triggering comment actually needs. A `--recent 10` pointer is kept
 // for cross-thread background the agent can pull on judgment.
 //
 // Both surfaces call this so the cold fallback cannot drift between them (same
@@ -97,7 +97,8 @@ func BuildColdCommentsHint(issueID, triggerCommentID, triggerThreadID string) st
 		"Read the triggering conversation first: "+
 			"`multica issue comment list %s --thread %s --tail 30 --output json` "+
 			"(that thread's root + its 30 newest replies). "+
-			"Need cross-thread background? `multica issue comment list %s --recent 20 --output json`.\n\n",
+			"Need cross-thread background? `multica issue comment list %s --recent 10 --output json` "+
+			"(resolved threads come back folded — `--full` to expand).\n\n",
 		issueID, threadID, issueID,
 	)
 }
@@ -157,44 +158,42 @@ func BuildCommentReplyInstructions(provider, issueID, triggerCommentID string) s
 	if triggerCommentID == "" {
 		return ""
 	}
+	return buildCommentReplyInstructionsSlim(provider, issueID, triggerCommentID)
+}
+
+// buildCommentReplyInstructionsSlim is the compressed reply-instructions
+// block used by BuildCommentReplyInstructions. It was introduced in
+// MUL-3560 as the slim alternative to a legacy verbose form; the
+// `runtime_brief_slim` flag has since been retired (MUL-4297) and this is
+// now the only form.
+//
+// The slim block carries only the trigger-specific cookbook (the exact
+// `--parent` UUID, the file path, the cleanup line) plus the two
+// behavioural rules tests pin ("do NOT reuse --parent" and "do not rely
+// on `\n` escapes"). The detailed shell-hazard rationale lives in the
+// canonical `## Comment Formatting` section the same brief carries, so
+// repeating it inline at every comment-triggered step 7 would be
+// duplication, not signal.
+func buildCommentReplyInstructionsSlim(provider, issueID, triggerCommentID string) string {
 	if runtimeGOOS == "windows" {
 		return fmt.Sprintf(
 			"If you decide to reply, post it as a comment — always use the trigger comment ID below, "+
 				"do NOT reuse --parent values from previous turns in this session.\n\n"+
-				"On Windows, write the reply body to a UTF-8 file with your file-write tool, then post it with `--content-file`. "+
-				"Do NOT pipe via `--content-stdin` — Windows PowerShell 5.1's `$OutputEncoding` defaults to ASCIIEncoding when piping to native commands and silently drops non-ASCII (Chinese, Japanese, Cyrillic, accents, emoji) as `?` before the bytes reach `multica.exe`. "+
-				"Do NOT use inline `--content`; it is easy to lose formatting or accidentally compress a structured reply into one line.\n\n"+
-				"Use this form, preserving the same issue ID and --parent value:\n\n"+
-				"    # 1. Write the reply body to a UTF-8 file (e.g. reply.md) with your file-write tool.\n"+
-				"    # 2. Post the comment:\n"+
+				"On Windows, write the reply body to a UTF-8 file with your file-write tool first, then post with `--content-file`. "+
+				"Do NOT pipe via `--content-stdin` — PowerShell 5.1's `$OutputEncoding` defaults to ASCIIEncoding when piping to native commands and silently drops non-ASCII (Chinese, Japanese, Cyrillic, accents, emoji) as `?` before bytes reach `multica.exe`. "+
+				"See ## Comment Formatting above for the full rule:\n\n"+
 				"    multica issue comment add %s --parent %s --content-file ./reply.md\n"+
-				"    # 3. Remove the temp file so a later run does not pick up stale content:\n"+
 				"    Remove-Item ./reply.md\n\n"+
 				"Do NOT write literal `\\n` escapes to simulate line breaks; the file preserves real newlines.\n",
 			issueID, triggerCommentID,
 		)
 	}
-	// Linux/macOS, any provider: `--content-file`. Switched from `--content-stdin` +
-	// HEREDOC to converge with the Windows path and close GitHub #4182. The
-	// HEREDOC pattern was safe for the trivial single-flag case, but as soon as
-	// the model wrapped extra flags around the heredoc (assignee, project on
-	// `issue create` / `issue update`) it became fragile to flag/heredoc
-	// boundary mistakes — flags either got swallowed into the body or executed
-	// as separate failing shell statements while the create succeeded with
-	// nulls. The file path eliminates that class of error: all flags live on
-	// one command line, the body never reaches the shell.
 	return fmt.Sprintf(
 		"If you decide to reply, post it as a comment — always use the trigger comment ID below, "+
 			"do NOT reuse --parent values from previous turns in this session.\n\n"+
-			"Write the reply body to a UTF-8 file with your file-write tool first, then post it with `--content-file`. "+
-			"Do NOT use inline `--content`; the shell rewrites unescaped backticks, `$()`, `$VAR`, or quotes in the body before the CLI receives them. "+
-			"Do NOT use `--content-stdin` with a HEREDOC either — when extra flags (e.g. `--assignee`, `--project` on `multica issue create`) accompany the command, the bash heredoc/flag boundary is fragile and flags can be silently swallowed into the stdin stream while the command still exits 0 (see GitHub #4182, OXY-78 / OXY-76). "+
-			"It is also easy to lose formatting or compress a structured reply into one line with inline forms.\n\n"+
-			"Use this form, preserving the same issue ID and --parent value:\n\n"+
-			"    # 1. Write the reply body to a UTF-8 file (e.g. reply.md) with your file-write tool.\n"+
-			"    # 2. Post the comment:\n"+
+			"Write the reply body to a UTF-8 file with your file-write tool first, then post it with `--content-file` "+
+			"(see ## Comment Formatting above for why inline `--content` and `--content-stdin` HEREDOCs are unsafe — MUL-2904 / #4182):\n\n"+
 			"    multica issue comment add %s --parent %s --content-file ./reply.md\n"+
-			"    # 3. Remove the temp file so a later run does not pick up stale content:\n"+
 			"    rm ./reply.md\n\n"+
 			"Do NOT write literal `\\n` escapes to simulate line breaks; the file preserves real newlines.\n",
 		issueID, triggerCommentID,

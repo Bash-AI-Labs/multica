@@ -1,6 +1,8 @@
 package repocache
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -148,6 +150,16 @@ func TestEnsureSafeGitConfigEnvNoInherited(t *testing.T) {
 	if os.Getenv("GIT_CONFIG_KEY_0") != "safe.directory" || os.Getenv("GIT_CONFIG_KEY_1") != "safe.bareRepository" {
 		t.Errorf("expected safe.directory at 0 and safe.bareRepository at 1, got %q / %q",
 			os.Getenv("GIT_CONFIG_KEY_0"), os.Getenv("GIT_CONFIG_KEY_1"))
+	}
+}
+
+func TestRunGitOutputTimesOut(t *testing.T) {
+	_, err := runGitOutputWithTimeout(0, "--version")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runGitOutputWithTimeout error = %v, want deadline exceeded", err)
+	}
+	if !strings.Contains(err.Error(), "timed out after 0s") {
+		t.Fatalf("runGitOutputWithTimeout error = %v, want timeout context", err)
 	}
 }
 

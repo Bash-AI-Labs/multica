@@ -15,12 +15,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/featureflags"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
+	"github.com/multica-ai/multica/server/internal/runtimeapps"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	"github.com/multica-ai/multica/server/pkg/redact"
+	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
@@ -32,16 +36,48 @@ type TaskService struct {
 	Analytics analytics.Client
 	Metrics   *obsmetrics.BusinessMetrics
 	Wakeup    TaskWakeupNotifier
+	// FeatureFlags is the server-side toggle router. Nil is valid and returns
+	// each call site's default.
+	FeatureFlags *featureflag.Service
 	// EmptyClaim caches "this runtime has no queued task" so the daemon
 	// poll path can skip a Postgres scan on the steady-state empty case.
 	// Optional — a nil cache disables the fast path and every claim
 	// goes through the DB. Wired in router.go from the shared Redis
 	// client.
 	EmptyClaim *EmptyClaimCache
+	// Composio computes the per-task MCP overlay (Stage 3 of the Composio
+	// epic, MUL-3721) — the integration's "current user's connected apps
+	// → MCP session URL" hook called from each Enqueue* path. Optional: a
+	// nil ComposioOverlayBuilder turns the overlay step into a no-op so
+	// every Multica deployment that hasn't enabled Composio behaves
+	// exactly as before. Wired in router.go after composiointeg.NewService
+	// succeeds; the concrete type is *composio.Service.
+	Composio ComposioOverlayBuilder
 
 	analyticsContextMu    sync.Mutex
 	analyticsContextCache map[string]analytics.TaskContext
 	analyticsContextOrder []string
+}
+
+// ComposioOverlayBuilder is the seam TaskService uses to build the per-task
+// MCP overlay at enqueue time. Implemented by
+// internal/integrations/composio.Service.BuildTaskOverlay; tests provide an
+// inline fake so they don't have to spin a fake Composio SDK.
+//
+// Contract: a zero MCPOverlayResult means "no overlay for this run" — covers
+// all gates the implementation enforces (no owner / empty allowlist / empty
+// intersection with active connections / empty session URL). Any non-empty
+// MCPOverlay is the exact value to store in agent_task_queue.runtime_mcp_overlay;
+// ConnectedApps is non-secret metadata to store alongside it for daemon brief
+// injection. A non-nil error is surfaced to the caller but treated as
+// best-effort — failed overlay computation must not fail the enqueue.
+//
+// agent is passed by value so the builder can inspect OwnerID and
+// ComposioToolkitAllowlist without re-querying the DB; every enqueue path
+// already loaded the agent for runtime/archive checks, so passing it is
+// free and avoids a second GetAgent round-trip in the hot path.
+type ComposioOverlayBuilder interface {
+	BuildTaskOverlay(ctx context.Context, originatorUserID pgtype.UUID, agent db.Agent) (runtimeapps.MCPOverlayResult, error)
 }
 
 type TaskWakeupNotifier interface {
@@ -82,9 +118,11 @@ func truncateForSummary(s string, maxRunes int) string {
 const (
 	taskAnalyticsContextCacheMax = 4096
 	// claimResponseRecoveryWindow must exceed daemon client.Timeout for
-	// /tasks/claim (30s) plus /tasks/{id}/start (30s) plus scheduling slack, so
-	// an in-flight StartTask cannot be reclaimed and double-dispatched.
+	// /tasks/claim (30s) plus /tasks/{id}/start (30s) plus scheduling slack.
+	// Longer pre-start work is protected by prepareLeaseDuration instead of
+	// stretching this global crash-recovery window.
 	claimResponseRecoveryWindow = 90 * time.Second
+	prepareLeaseDuration        = 45 * time.Second
 )
 
 // buildCommentTriggerSummary fetches the comment content and truncates
@@ -104,6 +142,34 @@ func (s *TaskService) buildCommentTriggerSummary(ctx context.Context, commentID 
 		return pgtype.Text{}
 	}
 	return pgtype.Text{String: summary, Valid: true}
+}
+
+// ResolveOriginatorFromTriggerComment is the exported wrapper used by the
+// comment-merge path (MUL-4195) to compute the top-of-chain human originator
+// for a newly-arrived comment, so a merge can be gated on the originator being
+// unchanged. See resolveOriginatorFromTriggerComment for the chain rules.
+func (s *TaskService) ResolveOriginatorFromTriggerComment(ctx context.Context, commentID pgtype.UUID) pgtype.UUID {
+	return s.resolveOriginatorFromTriggerComment(ctx, commentID)
+}
+
+// BuildCommentTriggerSummary is the exported wrapper used by the comment-merge
+// path (MUL-4195) to refresh a coalesced task's trigger_summary to the newest
+// trigger comment's snapshot.
+func (s *TaskService) BuildCommentTriggerSummary(ctx context.Context, commentID pgtype.UUID) pgtype.Text {
+	return s.buildCommentTriggerSummary(ctx, commentID)
+}
+
+// BuildRuntimeMCPOverlayForMerge recomputes the Composio MCP overlay +
+// connected-app metadata for (originatorUserID, agent), used when a merge
+// re-stamps a coalesced task's originator (MUL-4195 review must-fix #1). The
+// overlay is a pure function of (originator, agent); re-stamping it alongside
+// originator_user_id keeps the coalescing run's connected-app capabilities and
+// audit attribution consistent with the latest trigger comment's originator
+// instead of the task's original one. Fails soft to empty (same as the enqueue
+// path) so a transient Composio hiccup never blocks the merge.
+func (s *TaskService) BuildRuntimeMCPOverlayForMerge(ctx context.Context, originatorUserID pgtype.UUID, agent db.Agent) (overlay, connectedApps []byte) {
+	data := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	return data.Overlay, data.ConnectedApps
 }
 
 func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus, wakeups ...TaskWakeupNotifier) *TaskService {
@@ -139,6 +205,145 @@ func (s *TaskService) captureTaskQueued(ctx context.Context, task db.AgentTaskQu
 		source, runtimeMode, _ := s.taskMetricsContext(ctx, task)
 		s.Metrics.RecordTaskEnqueued(source, runtimeMode)
 	}
+}
+
+type runtimeMCPOverlayData struct {
+	Overlay       json.RawMessage
+	ConnectedApps json.RawMessage
+}
+
+// buildRuntimeMCPOverlay computes the optional per-task Composio MCP overlay.
+// Enqueue paths call this BEFORE inserting the queued row so the daemon cannot
+// claim a task during the network round-trip to Composio and miss the overlay.
+func (s *TaskService) buildRuntimeMCPOverlay(ctx context.Context, originatorUserID pgtype.UUID, agent db.Agent) runtimeMCPOverlayData {
+	if s == nil || s.Composio == nil {
+		return runtimeMCPOverlayData{}
+	}
+	if !featureflags.ComposioMCPAppsEnabled(ctx, s.FeatureFlags) {
+		return runtimeMCPOverlayData{}
+	}
+	result, err := s.Composio.BuildTaskOverlay(ctx, originatorUserID, agent)
+	if err != nil {
+		slog.Warn("runtime mcp overlay: BuildTaskOverlay failed; task will run without composio overlay",
+			"originator_user_id", util.UUIDToString(originatorUserID),
+			"agent_id", util.UUIDToString(agent.ID),
+			"error", err,
+		)
+		return runtimeMCPOverlayData{}
+	}
+	if len(result.MCPOverlay) == 0 {
+		slog.Debug("runtime mcp overlay: no composio overlay for task",
+			"originator_user_id", util.UUIDToString(originatorUserID),
+			"agent_id", util.UUIDToString(agent.ID),
+		)
+		return runtimeMCPOverlayData{}
+	}
+	data := runtimeMCPOverlayData{Overlay: result.MCPOverlay}
+	if len(result.ConnectedApps) > 0 {
+		raw, err := json.Marshal(result.ConnectedApps)
+		if err != nil {
+			slog.Warn("runtime mcp overlay: marshal connected app metadata failed",
+				"originator_user_id", util.UUIDToString(originatorUserID),
+				"agent_id", util.UUIDToString(agent.ID),
+				"error", err,
+			)
+			return data
+		}
+		data.ConnectedApps = raw
+	}
+	return data
+}
+
+// resolveOriginatorFromTriggerComment returns the top-of-chain HUMAN user
+// id for a comment that triggered an Enqueue* path. The chain rules
+// (MUL-3869):
+//
+//   - trigger comment authored by a member → originator = author_id (that
+//     member IS the top-of-chain human).
+//   - trigger comment authored by an agent → read the parent task via
+//     comment.source_task_id and inherit its originator_user_id. This is
+//     the load-bearing case for agent fan-out: agent A @-mentions agent B,
+//     comment author is A, but we MUST surface the human who originally
+//     told A to run, not lose the originator at the first agent hop.
+//   - missing comment / unknown source task / NULL parent originator →
+//     invalid pgtype.UUID. BuildTaskOverlay treats that as "no overlay"
+//     (gate 1).
+//
+// A nil receiver / nil Queries falls through to invalid so unit-test
+// setups that don't wire a DB stay safe.
+func (s *TaskService) resolveOriginatorFromTriggerComment(ctx context.Context, commentID pgtype.UUID) pgtype.UUID {
+	if s == nil || s.Queries == nil {
+		return pgtype.UUID{}
+	}
+	if !commentID.Valid {
+		return pgtype.UUID{}
+	}
+	comment, err := s.Queries.GetComment(ctx, commentID)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	switch comment.AuthorType {
+	case "member":
+		return comment.AuthorID
+	case "agent":
+		// Inherit from the agent's own triggering task. comment.source_task_id
+		// is set by every agent comment-write path (see migration 120), so a
+		// NULL here means either the comment predates that migration or it
+		// was authored out-of-band — both fall through to "no overlay".
+		if !comment.SourceTaskID.Valid {
+			return pgtype.UUID{}
+		}
+		parent, err := s.Queries.GetAgentTask(ctx, comment.SourceTaskID)
+		if err != nil {
+			return pgtype.UUID{}
+		}
+		return parent.OriginatorUserID
+	default:
+		return pgtype.UUID{}
+	}
+}
+
+// resolveOriginatorForIssueTask returns the top-of-chain human for issue-backed
+// dispatches. Comment-triggered runs keep the existing comment-chain semantics;
+// direct issue assignment/creation falls back to the issue's member creator.
+// Agent-created issues that carry an explicit task-origin link — quick_create
+// (daemon quick-create flow) or agent_create (an agent's ordinary `issue
+// create`, MUL-4305) — inherit that origin task's originator, since origin_id
+// points at the agent_task_queue row that created the issue. Other
+// agent/system origins, including autopilot, deliberately remain unattributed.
+func (s *TaskService) resolveOriginatorForIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID) pgtype.UUID {
+	if triggerCommentID.Valid {
+		return s.resolveOriginatorFromTriggerComment(ctx, triggerCommentID)
+	}
+	if issue.CreatorType == "member" && issue.CreatorID.Valid {
+		return issue.CreatorID
+	}
+	if s == nil || s.Queries == nil || !issue.OriginType.Valid || !issue.OriginID.Valid {
+		return pgtype.UUID{}
+	}
+	switch issue.OriginType.String {
+	case "quick_create", "agent_create":
+		// Both stamp origin_id with the agent_task_queue row that created the
+		// issue, so the top-of-chain human is that task's originator_user_id.
+		task, err := s.Queries.GetAgentTask(ctx, issue.OriginID)
+		if err != nil {
+			return pgtype.UUID{}
+		}
+		return task.OriginatorUserID
+	default:
+		return pgtype.UUID{}
+	}
+}
+
+// OriginatorForIssueTask exposes resolveOriginatorForIssueTask to callers
+// outside the service package (the squad-leader access gate in the handler
+// layer) so the gate judges the top-of-chain human with the exact same
+// resolution the enqueue path persists on the task row. Without a shared entry
+// point the gate saw an empty originator for agent-triggered assigns and denied
+// private leaders that the write path would have attributed correctly
+// (MUL-4305).
+func (s *TaskService) OriginatorForIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID) pgtype.UUID {
+	return s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
 }
 
 func (s *TaskService) captureTaskDispatched(ctx context.Context, task db.AgentTaskQueue) {
@@ -434,7 +639,15 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 	if len(triggerCommentID) > 0 {
 		commentID = triggerCommentID[0]
 	}
-	return s.enqueueIssueTask(ctx, issue, commentID, false)
+	return s.enqueueIssueTask(ctx, issue, commentID, false, "")
+}
+
+// EnqueueTaskForIssueWithHandoff is the assign/promote variant that carries a
+// handoff note into the run's opening context (MUL-3375). The note rides a
+// dedicated task column; the daemon renders it via the assignment-handoff
+// branch. Empty note behaves exactly like EnqueueTaskForIssue.
+func (s *TaskService) EnqueueTaskForIssueWithHandoff(ctx context.Context, issue db.Issue, handoffNote string) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, handoffNote)
 }
 
 // enqueueIssueTask is the shared implementation behind EnqueueTaskForIssue
@@ -442,7 +655,47 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 // daemon claim handler skips the (agent_id, issue_id) resume lookup — the
 // user already judged the prior output bad, a fresh agent session is the
 // expected behavior.
-func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error) {
+// ResolveIssueReviewSHA returns the head SHA of the commit currently under
+// review for an issue (the head_sha of its most-relevant linked PR), or the
+// empty string when the issue has no linked PR. Callers thread this into both
+// the reviewer-loop dedup check and the enqueue path so a pending review task
+// pinned to an old head does not satisfy a request after HEAD advanced
+// (TEN-356). Empty string is the safe default: it makes dedup fall back to the
+// pre-TEN-356 (issue_id, agent_id) key and leaves the task's context NULL.
+//
+// The lookup fails soft — any DB error (including "no linked PR") returns "" so
+// a transient github-table hiccup can never over-dedup a review out of
+// existence; the worst case is the pre-TEN-356 coalescing behavior.
+func (s *TaskService) ResolveIssueReviewSHA(ctx context.Context, issueID pgtype.UUID) string {
+	if !issueID.Valid {
+		return ""
+	}
+	sha, err := s.Queries.GetIssueReviewHeadSha(ctx, issueID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("resolve issue review sha failed",
+				"issue_id", util.UUIDToString(issueID), "error", err)
+		}
+		return ""
+	}
+	return sha
+}
+
+// headShaText wraps a resolved review SHA into the pgtype.Text the dedup/enqueue
+// queries expect. Empty SHA marshals to an invalid (NULL) Text so the queries
+// take their fall-back branch.
+func headShaText(sha string) pgtype.Text {
+	return pgtype.Text{String: sha, Valid: sha != ""}
+}
+
+// ResolveIssueReviewSHAParam is ResolveIssueReviewSHA wrapped as the pgtype.Text
+// the dedup queries take, so both service- and handler-package call sites can
+// key dedup on the reviewed head with a single call (TEN-356).
+func (s *TaskService) ResolveIssueReviewSHAParam(ctx context.Context, issueID pgtype.UUID) pgtype.Text {
+	return headShaText(s.ResolveIssueReviewSHA(ctx, issueID))
+}
+
+func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, handoffNote string) (db.AgentTaskQueue, error) {
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
 		return db.AgentTaskQueue{}, fmt.Errorf("issue has no assignee")
@@ -462,14 +715,23 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
 
+	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:           issue.AssigneeID,
-		RuntimeID:         agent.RuntimeID,
-		IssueID:           issue.ID,
-		Priority:          priorityToInt(issue.Priority),
-		TriggerCommentID:  triggerCommentID,
-		TriggerSummary:    s.buildCommentTriggerSummary(ctx, triggerCommentID),
-		ForceFreshSession: pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
+		AgentID:              issue.AssigneeID,
+		RuntimeID:            agent.RuntimeID,
+		IssueID:              issue.ID,
+		Priority:             priorityToInt(issue.Priority),
+		TriggerCommentID:     triggerCommentID,
+		TriggerSummary:       s.buildCommentTriggerSummary(ctx, triggerCommentID),
+		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
+		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
+		OriginatorUserID:     originatorUserID,
+		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
+		// Stamp the reviewed head so dedup can distinguish this run's target
+		// from a later request against a new HEAD (TEN-356).
+		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
 	})
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
@@ -497,7 +759,13 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 // Unlike EnqueueTaskForIssue, this takes an explicit agent ID rather than
 // deriving it from the issue assignee.
 func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, false)
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "")
+}
+
+// EnqueueTaskForThreadParent creates a queued task for the agent who authored
+// the direct parent comment a member replied to.
+func (s *TaskService) EnqueueTaskForThreadParent(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "")
 }
 
 // EnqueueTaskForSquadLeader is the leader-role variant of EnqueueTaskForMention.
@@ -506,11 +774,23 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 // acting as the squad's leader (skip) from one posted while it was acting
 // as a worker (do not skip). This matters for agents that are simultaneously
 // the leader and a worker of the same squad — see migration 090.
-func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, false)
+//
+// squadID is stamped onto the task's squad_id column so the daemon claim
+// handler can locate the squad and inject its briefing regardless of how the
+// leader task was triggered (comment @squad, issue assign, autopilot,
+// sub-issue done callback). See migration 127.
+func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, squadID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, squadID, false, "")
 }
 
-func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, forceFreshSession bool) (db.AgentTaskQueue, error) {
+// EnqueueTaskForSquadLeaderWithHandoff is the assign/promote variant carrying a
+// handoff note into the leader run's opening context (MUL-3375). Empty note
+// behaves exactly like EnqueueTaskForSquadLeader.
+func (s *TaskService) EnqueueTaskForSquadLeaderWithHandoff(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, squadID pgtype.UUID, handoffNote string) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, leaderID, pgtype.UUID{}, true, squadID, false, handoffNote)
+}
+
+func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -525,15 +805,25 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
 
+	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:           agentID,
-		RuntimeID:         agent.RuntimeID,
-		IssueID:           issue.ID,
-		Priority:          priorityToInt(issue.Priority),
-		TriggerCommentID:  triggerCommentID,
-		TriggerSummary:    s.buildCommentTriggerSummary(ctx, triggerCommentID),
-		IsLeaderTask:      pgtype.Bool{Bool: isLeader, Valid: isLeader},
-		ForceFreshSession: pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
+		AgentID:              agentID,
+		RuntimeID:            agent.RuntimeID,
+		IssueID:              issue.ID,
+		Priority:             priorityToInt(issue.Priority),
+		TriggerCommentID:     triggerCommentID,
+		TriggerSummary:       s.buildCommentTriggerSummary(ctx, triggerCommentID),
+		IsLeaderTask:         pgtype.Bool{Bool: isLeader, Valid: isLeader},
+		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
+		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
+		SquadID:              squadID,
+		OriginatorUserID:     originatorUserID,
+		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
+		// Stamp the reviewed head so dedup can distinguish this run's target
+		// from a later request against a new HEAD (TEN-356).
+		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
 	})
 	if err != nil {
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -544,6 +834,50 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.NotifyTaskEnqueued(ctx, task)
+	return task, nil
+}
+
+// EnqueueDeferredAssigneeFallback creates an inert task that becomes claimable
+// only after PromoteDueDeferredTasksForRuntime flips it from deferred to queued.
+func (s *TaskService) EnqueueDeferredAssigneeFallback(ctx context.Context, issue db.Issue, agentID, squadID pgtype.UUID, escalationForTaskID pgtype.UUID, triggerCommentID pgtype.UUID, fireAt time.Time) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		slog.Error("deferred fallback enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		slog.Debug("deferred fallback enqueue skipped: agent is archived", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		slog.Error("deferred fallback enqueue failed: agent has no runtime", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	isLeader := squadID.Valid
+	task, err := s.Queries.CreateDeferredAgentTask(ctx, db.CreateDeferredAgentTaskParams{
+		AgentID:             agentID,
+		RuntimeID:           agent.RuntimeID,
+		IssueID:             issue.ID,
+		Priority:            priorityToInt(issue.Priority),
+		TriggerCommentID:    triggerCommentID,
+		TriggerSummary:      s.buildCommentTriggerSummary(ctx, triggerCommentID),
+		IsLeaderTask:        pgtype.Bool{Bool: isLeader, Valid: isLeader},
+		SquadID:             squadID,
+		EscalationForTaskID: escalationForTaskID,
+		FireAt:              pgtype.Timestamptz{Time: fireAt, Valid: true},
+	})
+	if err != nil {
+		slog.Error("deferred fallback enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("create deferred task: %w", err)
+	}
+
+	slog.Info("deferred fallback task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"issue_id", util.UUIDToString(issue.ID),
+		"agent_id", util.UUIDToString(agentID),
+		"fire_at", fireAt.UTC().Format(time.RFC3339),
+	)
 	return task, nil
 }
 
@@ -642,11 +976,15 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 		return db.AgentTaskQueue{}, fmt.Errorf("marshal quick-create context: %w", err)
 	}
 
+	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, requesterID, agent)
 	task, err := s.Queries.CreateQuickCreateTask(ctx, db.CreateQuickCreateTaskParams{
-		AgentID:   agentID,
-		RuntimeID: agent.RuntimeID,
-		Priority:  priorityToInt("high"),
-		Context:   contextJSON,
+		AgentID:              agentID,
+		RuntimeID:            agent.RuntimeID,
+		Priority:             priorityToInt("high"),
+		Context:              contextJSON,
+		OriginatorUserID:     requesterID,
+		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
 	})
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("create quick-create task: %w", err)
@@ -707,7 +1045,11 @@ var ErrChatTaskAgentNoRuntime = errors.New("chat task: agent has no runtime")
 // passes the request user; the lark dispatcher passes the inbound sender of the
 // latest message in the silence window. Stored on the task so the daemon brief
 // can attribute the run to the right person. See MUL-2645.
-func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSession, initiatorUserID pgtype.UUID) (db.AgentTaskQueue, error) {
+//
+// forceFreshSession applies only to the task created by this call. The daemon
+// uses it to skip prior chat-session resume for this dispatch without clearing
+// the chat session's stored resume pointer for future normal messages.
+func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSession, initiatorUserID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, chatSession.AgentID)
 	if err != nil {
 		slog.Error("chat task enqueue failed", "chat_session_id", util.UUIDToString(chatSession.ID), "error", err)
@@ -720,12 +1062,20 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
 	}
 
+	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, initiatorUserID, agent)
 	task, err := s.Queries.CreateChatTask(ctx, db.CreateChatTaskParams{
-		AgentID:         chatSession.AgentID,
-		RuntimeID:       agent.RuntimeID,
-		Priority:        2, // medium priority for chat
-		ChatSessionID:   chatSession.ID,
-		InitiatorUserID: initiatorUserID,
+		AgentID:          chatSession.AgentID,
+		RuntimeID:        agent.RuntimeID,
+		Priority:         2, // medium priority for chat
+		ChatSessionID:    chatSession.ID,
+		InitiatorUserID:  initiatorUserID,
+		OriginatorUserID: initiatorUserID,
+		ForceFreshSession: pgtype.Bool{
+			Bool:  forceFreshSession,
+			Valid: true,
+		},
+		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
 	})
 	if err != nil {
 		slog.Error("chat task enqueue failed", "chat_session_id", util.UUIDToString(chatSession.ID), "error", err)
@@ -939,51 +1289,70 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 	var (
 		outcome                                                              = "unknown"
 		getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs int64
+		claimed                                                              *db.AgentTaskQueue
 	)
 	defer func() {
 		s.maybeLogClaimSlow(agentID, outcome, start, getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs)
 	}()
 
-	t0 := start
-	agent, err := s.Queries.GetAgent(ctx, agentID)
-	getAgentMs = time.Since(t0).Milliseconds()
-	if err != nil {
-		outcome = "error_get_agent"
-		return nil, fmt.Errorf("agent not found: %w", err)
-	}
-
-	t0 = time.Now()
-	running, err := s.Queries.CountRunningTasks(ctx, agentID)
-	countRunningMs = time.Since(t0).Milliseconds()
-	if err != nil {
-		outcome = "error_count_running"
-		return nil, fmt.Errorf("count running tasks: %w", err)
-	}
-	if running >= int64(agent.MaxConcurrentTasks) {
-		slog.Debug("task claim: no capacity", "agent_id", util.UUIDToString(agentID), "running", running, "max", agent.MaxConcurrentTasks)
-		outcome = "no_capacity"
-		return nil, nil // No capacity
-	}
-
-	t0 = time.Now()
-	task, err := s.Queries.ClaimAgentTask(ctx, agentID)
-	claimAgentMs = time.Since(t0).Milliseconds()
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Debug("task claim: no tasks available", "agent_id", util.UUIDToString(agentID))
-			outcome = "no_tasks"
-			return nil, nil // No tasks available
+	err := s.runInTx(ctx, func(qtx *db.Queries) error {
+		t0 := time.Now()
+		agent, err := qtx.GetAgentForClaimUpdate(ctx, agentID)
+		getAgentMs = time.Since(t0).Milliseconds()
+		if err != nil {
+			outcome = "error_get_agent"
+			return fmt.Errorf("agent not found: %w", err)
 		}
-		outcome = "error_claim"
-		return nil, fmt.Errorf("claim task: %w", err)
+
+		t0 = time.Now()
+		running, err := qtx.CountRunningTasks(ctx, agentID)
+		countRunningMs = time.Since(t0).Milliseconds()
+		if err != nil {
+			outcome = "error_count_running"
+			return fmt.Errorf("count running tasks: %w", err)
+		}
+		if running >= int64(agent.MaxConcurrentTasks) {
+			slog.Debug("task claim: no capacity", "agent_id", util.UUIDToString(agentID), "running", running, "max", agent.MaxConcurrentTasks)
+			outcome = "no_capacity"
+			return nil
+		}
+
+		t0 = time.Now()
+		task, err := qtx.ClaimAgentTask(ctx, db.ClaimAgentTaskParams{
+			AgentID:          agentID,
+			PrepareLeaseSecs: prepareLeaseDuration.Seconds(),
+		})
+		claimAgentMs = time.Since(t0).Milliseconds()
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				slog.Debug("task claim: no tasks available", "agent_id", util.UUIDToString(agentID))
+				outcome = "no_tasks"
+				return nil
+			}
+			outcome = "error_claim"
+			return fmt.Errorf("claim task: %w", err)
+		}
+
+		claimedTask := task
+		claimed = &claimedTask
+		return nil
+	})
+	if err != nil {
+		if outcome == "unknown" {
+			outcome = "error_transaction"
+		}
+		return nil, err
+	}
+	if claimed == nil {
+		return nil, nil
 	}
 
-	slog.Info("task claimed", "task_id", util.UUIDToString(task.ID), "agent_id", util.UUIDToString(agentID))
-	s.captureTaskDispatched(ctx, task)
+	slog.Info("task claimed", "task_id", util.UUIDToString(claimed.ID), "agent_id", util.UUIDToString(agentID))
+	s.captureTaskDispatched(ctx, *claimed)
 
 	// Refresh agent status from active tasks. This avoids a stale unconditional
 	// working write racing after a just-cancelled claim.
-	t0 = time.Now()
+	t0 := time.Now()
 	s.ReconcileAgentStatus(ctx, agentID)
 	updateStatusMs = time.Since(t0).Milliseconds()
 
@@ -991,11 +1360,11 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 	// re-query issue/chat_session/autopilot_run, so it can also be a real
 	// contributor to claim latency.
 	t0 = time.Now()
-	s.broadcastTaskDispatch(ctx, task)
+	s.broadcastTaskDispatch(ctx, *claimed)
 	dispatchMs = time.Since(t0).Milliseconds()
 
 	outcome = "claimed"
-	return &task, nil
+	return claimed, nil
 }
 
 // ClaimTaskForRuntime claims the next runnable task for a runtime while
@@ -1032,11 +1401,17 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 	}()
 
 	runtimeKey := util.UUIDToString(runtimeID)
+	if err := s.PromoteDueDeferredTasksForRuntime(ctx, runtimeID); err != nil {
+		outcome = "error_promote_deferred"
+		return nil, err
+	}
+
 	// Check this before EmptyClaim: a lost claim response moves the task out of
 	// `queued`, so the empty-queued cache cannot represent recoverability.
 	stale, err := s.Queries.ReclaimStaleDispatchedTaskForRuntime(ctx, db.ReclaimStaleDispatchedTaskForRuntimeParams{
 		RuntimeID:         runtimeID,
 		ClaimRecoverySecs: claimResponseRecoveryWindow.Seconds(),
+		PrepareLeaseSecs:  prepareLeaseDuration.Seconds(),
 	})
 	if err == nil {
 		outcome = "reclaimed_dispatched"
@@ -1112,6 +1487,23 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 	return claimed, nil
 }
 
+func (s *TaskService) PromoteDueDeferredTasksForRuntime(ctx context.Context, runtimeID pgtype.UUID) error {
+	tasks, err := s.Queries.PromoteDueDeferredTasksForRuntime(ctx, runtimeID)
+	if err != nil {
+		return fmt.Errorf("promote due deferred tasks: %w", err)
+	}
+	for _, task := range tasks {
+		slog.Info("deferred fallback task promoted",
+			"task_id", util.UUIDToString(task.ID),
+			"runtime_id", util.UUIDToString(runtimeID),
+			"agent_id", util.UUIDToString(task.AgentID),
+		)
+		s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+		s.NotifyTaskEnqueued(ctx, task)
+	}
+	return nil
+}
+
 // maybeLogClaimSlow emits one structured log per ClaimTask call when its total
 // latency exceeds 300ms, so the prod tail can be diagnosed without flooding
 // logs at normal poll rates. Called via defer so it captures the full path
@@ -1141,6 +1533,7 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 	if err != nil {
 		return nil, fmt.Errorf("start task: %w", err)
 	}
+	s.cancelDeferredEscalationsForTask(ctx, task.ID)
 
 	slog.Info("task started", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskStarted(ctx, task)
@@ -1154,6 +1547,57 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 	return &task, nil
 }
 
+func (s *TaskService) cancelDeferredEscalationsForTask(ctx context.Context, taskID pgtype.UUID) {
+	cancelled, err := s.Queries.CancelDeferredEscalationsForTask(ctx, taskID)
+	if err != nil {
+		slog.Warn("cancel deferred escalations for task failed", "task_id", util.UUIDToString(taskID), "error", err)
+		return
+	}
+	for _, task := range cancelled {
+		slog.Info("deferred fallback task cancelled",
+			"task_id", util.UUIDToString(task.ID),
+			"primary_task_id", util.UUIDToString(taskID),
+			"reason", "primary_acknowledged",
+		)
+	}
+}
+
+func (s *TaskService) CancelDeferredEscalationsForIssueAgent(ctx context.Context, issueID, agentID pgtype.UUID) {
+	cancelled, err := s.Queries.CancelDeferredEscalationsForIssueAgent(ctx, db.CancelDeferredEscalationsForIssueAgentParams{
+		IssueID: issueID,
+		AgentID: agentID,
+	})
+	if err != nil {
+		slog.Warn("cancel deferred escalations for issue agent failed",
+			"issue_id", util.UUIDToString(issueID),
+			"agent_id", util.UUIDToString(agentID),
+			"error", err)
+		return
+	}
+	for _, task := range cancelled {
+		slog.Info("deferred fallback task cancelled",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(issueID),
+			"agent_id", util.UUIDToString(agentID),
+			"reason", "agent_comment_acknowledged",
+		)
+	}
+}
+
+// ExtendTaskPrepareLease keeps a claimed-but-not-started task protected while
+// the daemon resolves cached inputs and prepares the execution environment.
+func (s *TaskService) ExtendTaskPrepareLease(ctx context.Context, taskID, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	task, err := s.Queries.ExtendAgentTaskPrepareLease(ctx, db.ExtendAgentTaskPrepareLeaseParams{
+		ID:        taskID,
+		RuntimeID: runtimeID,
+		LeaseSecs: prepareLeaseDuration.Seconds(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("extend task prepare lease: %w", err)
+	}
+	return &task, nil
+}
+
 // MarkTaskWaitingLocalDirectory parks a dispatched task in the
 // waiting_local_directory state while the daemon waits for another in-flight
 // task to release the project_resource path lock. reason carries a short
@@ -1163,8 +1607,9 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 func (s *TaskService) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID pgtype.UUID, reason string) (*db.AgentTaskQueue, error) {
 	reason = strings.TrimSpace(reason)
 	task, err := s.Queries.MarkAgentTaskWaitingLocalDirectory(ctx, db.MarkAgentTaskWaitingLocalDirectoryParams{
-		ID:         taskID,
-		WaitReason: pgtype.Text{String: reason, Valid: reason != ""},
+		ID:               taskID,
+		WaitReason:       pgtype.Text{String: reason, Valid: reason != ""},
+		PrepareLeaseSecs: prepareLeaseDuration.Seconds(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mark task waiting_local_directory: %w", err)
@@ -1333,13 +1778,8 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 				slog.Error("failed to save assistant chat message", "task_id", util.UUIDToString(task.ID), "error", err)
 			} else {
 				assistantMsg = &row
-				// Event-driven unread: stamp unread_since on the first unread
-				// assistant message. No-op if the session already has unread.
-				// If the user is actively viewing the session, the frontend's
-				// auto-mark-read effect will clear this within a tick.
-				if err := s.Queries.SetUnreadSinceIfNull(ctx, task.ChatSessionID); err != nil {
-					slog.Warn("failed to set unread_since", "chat_session_id", util.UUIDToString(task.ChatSessionID), "error", err)
-				}
+				// Unread is derived from the read cursor (chat_session.last_read_at)
+				// vs the assistant messages after it — no per-reply stamping needed.
 			}
 		}
 		s.broadcastChatDone(ctx, task, assistantMsg)
@@ -1477,10 +1917,6 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 				"task_id", util.UUIDToString(task.ID),
 				"chat_session_id", util.UUIDToString(task.ChatSessionID),
 				"error", err)
-		} else if err := s.Queries.SetUnreadSinceIfNull(ctx, task.ChatSessionID); err != nil {
-			slog.Warn("failed to set unread_since on failure",
-				"chat_session_id", util.UUIDToString(task.ChatSessionID),
-				"error", err)
 		}
 	}
 
@@ -1561,7 +1997,25 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		return nil, nil
 	}
 
-	child, err := s.Queries.CreateRetryTask(ctx, parent.ID)
+	var runtimeMCPOverlay runtimeMCPOverlayData
+	agent, agentErr := s.Queries.GetAgent(ctx, parent.AgentID)
+	if agentErr != nil {
+		// Best-effort: failing to resolve the agent for the overlay is not
+		// retry-fatal. Log and continue — the daemon will reject the claim
+		// later if the agent is genuinely gone.
+		slog.Warn("task auto-retry: load agent for overlay failed",
+			"parent_task_id", util.UUIDToString(parent.ID),
+			"agent_id", util.UUIDToString(parent.AgentID),
+			"error", agentErr,
+		)
+	} else {
+		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, agent)
+	}
+	child, err := s.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID:                   parent.ID,
+		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
+	})
 	if err != nil {
 		slog.Warn("task auto-retry failed",
 			"parent_task_id", util.UUIDToString(parent.ID),
@@ -1580,6 +2034,7 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	// Retry creates a fresh queued row, same status transition (∅ → queued)
 	// as EnqueueTaskFor*. Broadcast queued first, then notify the daemon —
 	// see EnqueueTaskForIssue for ordering rationale.
+	//
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
 	s.NotifyTaskEnqueued(ctx, child)
 	return &child, nil
@@ -1624,6 +2079,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 	var (
 		agentID  pgtype.UUID
 		isLeader bool
+		squadID  pgtype.UUID
 	)
 	if sourceTaskID.Valid {
 		sourceTask, err := s.Queries.GetAgentTask(ctx, sourceTaskID)
@@ -1635,6 +2091,10 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 		}
 		agentID = sourceTask.AgentID
 		isLeader = sourceTask.IsLeaderTask
+		// Carry the source task's squad provenance so a rerun of a leader
+		// task still injects the squad briefing at claim time (see migration
+		// 127 / daemon claim handler).
+		squadID = sourceTask.SquadID
 		// Inherit trigger provenance so a per-row rerun of a comment- or
 		// mention-triggered task stays a comment-triggered task. Without
 		// this the daemon's buildCommentPrompt path is skipped (it keys on
@@ -1655,6 +2115,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 			}
 			agentID = squad.LeaderID
 			isLeader = true
+			squadID = issue.AssigneeID
 		default:
 			return nil, fmt.Errorf("issue is not assigned to an agent or squad")
 		}
@@ -1678,7 +2139,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
 	}
 
-	task, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, isLeader)
+	task, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, isLeader, squadID)
 	if err != nil {
 		return nil, err
 	}
@@ -1699,12 +2160,12 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 // stays in sync; otherwise (squad member, prior assignee that has since been
 // reassigned, mention agent) we use the mention path with the same
 // force_fresh_session=true contract.
-func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool) (db.AgentTaskQueue, error) {
+func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID) (db.AgentTaskQueue, error) {
 	if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
 		util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
-		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true)
+		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true, "")
 	}
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, isLeader, true)
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, isLeader, squadID, true, "")
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of
@@ -1758,15 +2219,23 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 							"error", checkErr,
 						)
 					} else if !hasActive {
-						if _, updateErr := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+						updatedIssue, updateErr := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
 							ID:          t.IssueID,
 							Status:      "todo",
 							WorkspaceID: issue.WorkspaceID,
-						}); updateErr != nil {
+						})
+						if updateErr != nil {
 							slog.Warn("handle failed tasks: reset stuck issue failed",
 								"issue_id", issueKey,
 								"error", updateErr,
 							)
+						} else {
+							// This direct reset bypasses the HTTP UpdateIssue
+							// handler that normally emits issue:updated, so emit
+							// it here too. Without it the board / status-filter
+							// caches keep showing the issue as in_progress until
+							// the next write touches it (#4648 / MUL-3782).
+							s.broadcastIssueUpdated(updatedIssue, issue.Status)
 						}
 					}
 				}
@@ -1890,19 +2359,116 @@ func (s *TaskService) LoadAgentSkills(ctx context.Context, agentID pgtype.UUID) 
 	return result
 }
 
+// LoadAgentSkillBundles returns every skill visible to an agent, including
+// built-ins, with stable bundle hashes and lightweight refs for slim claims.
+func (s *TaskService) LoadAgentSkillBundles(ctx context.Context, agentID pgtype.UUID) ([]AgentSkillData, []AgentSkillRefData) {
+	skills := s.LoadAgentSkills(ctx, agentID)
+	skills = append(skills, s.BuiltinSkills()...)
+	return BuildAgentSkillBundles(skills)
+}
+
+func BuildAgentSkillBundles(skills []AgentSkillData) ([]AgentSkillData, []AgentSkillRefData) {
+	bundles := make([]AgentSkillData, 0, len(skills))
+	refs := make([]AgentSkillRefData, 0, len(skills))
+	for _, skill := range skills {
+		source := skill.Source
+		id := skill.ID
+		if source == "" {
+			if id == "" {
+				source = skillbundle.SourceBuiltin
+			} else {
+				source = skillbundle.SourceWorkspace
+			}
+		}
+		if id == "" && source == skillbundle.SourceBuiltin {
+			id = "builtin:" + skill.Name
+		}
+		skill.Source = source
+		skill.ID = id
+
+		files := make([]skillbundle.File, 0, len(skill.Files))
+		for _, file := range skill.Files {
+			files = append(files, skillbundle.File{Path: file.Path, Content: file.Content})
+		}
+		manifest := skillbundle.BuildManifest(skillbundle.Skill{
+			ID:          skill.ID,
+			Source:      skill.Source,
+			Name:        skill.Name,
+			Description: skill.Description,
+			Content:     skill.Content,
+			Files:       files,
+		})
+		skill.Hash = manifest.Hash
+		skill.SizeBytes = manifest.SizeBytes
+		fileRefsByPath := make(map[string]skillbundle.FileRef, len(manifest.Files))
+		for _, file := range manifest.Files {
+			fileRefsByPath[file.Path] = file
+		}
+		for i := range skill.Files {
+			if ref, ok := fileRefsByPath[skill.Files[i].Path]; ok {
+				skill.Files[i].SHA256 = ref.SHA256
+				skill.Files[i].SizeBytes = ref.SizeBytes
+			}
+		}
+		bundles = append(bundles, skill)
+
+		refFiles := make([]AgentSkillFileRefData, 0, len(manifest.Files))
+		for _, file := range manifest.Files {
+			refFiles = append(refFiles, AgentSkillFileRefData{
+				Path:      file.Path,
+				SHA256:    file.SHA256,
+				SizeBytes: file.SizeBytes,
+			})
+		}
+		refs = append(refs, AgentSkillRefData{
+			ID:          skill.ID,
+			Source:      skill.Source,
+			Name:        skill.Name,
+			Description: skill.Description,
+			Hash:        manifest.Hash,
+			SizeBytes:   manifest.SizeBytes,
+			FileCount:   manifest.FileCount,
+			Files:       refFiles,
+		})
+	}
+	return bundles, refs
+}
+
 // AgentSkillData represents a skill for task execution responses.
 type AgentSkillData struct {
 	ID          string               `json:"id"`
+	Source      string               `json:"source,omitempty"`
 	Name        string               `json:"name"`
 	Description string               `json:"description,omitempty"`
+	Hash        string               `json:"hash,omitempty"`
+	SizeBytes   int64                `json:"size_bytes,omitempty"`
 	Content     string               `json:"content"`
 	Files       []AgentSkillFileData `json:"files,omitempty"`
 }
 
 // AgentSkillFileData represents a supporting file within a skill.
 type AgentSkillFileData struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	SHA256    string `json:"sha256,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+}
+
+type AgentSkillRefData struct {
+	ID          string                  `json:"id"`
+	Source      string                  `json:"source"`
+	Name        string                  `json:"name"`
+	Description string                  `json:"description,omitempty"`
+	Hash        string                  `json:"hash"`
+	SizeBytes   int64                   `json:"size_bytes"`
+	FileCount   int                     `json:"file_count"`
+	Files       []AgentSkillFileRefData `json:"files,omitempty"`
+}
+
+type AgentSkillFileRefData struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 // computeChatElapsedMs returns the wall-clock duration from task creation
@@ -2089,14 +2655,32 @@ func (s *TaskService) broadcastChatDone(ctx context.Context, task db.AgentTaskQu
 	})
 }
 
-func (s *TaskService) broadcastIssueUpdated(issue db.Issue) {
+// broadcastIssueUpdated publishes the issue:updated event the frontend's
+// realtime reconcile (onIssueUpdated) relies on to move an issue between status
+// columns / status filters and reconcile their bucket counts. prevStatus is the
+// issue's status before the write so the client can gate that reconcile on
+// status_changed.
+//
+// The `issue` payload is a map (issueToMap), which the workspace WS fanout
+// (listeners.go SubscribeAll) marshals and broadcasts as-is — that is what
+// drives the UI reconcile. Note this does NOT cover the full HTTP UpdateIssue
+// side effects: the activity-log and inbox listeners type-assert `issue` to a
+// handler.IssueResponse and skip a map, so a background status reset does not
+// emit status-change activity / notifications. That is intentional for the
+// realtime-staleness fix (#4648 / MUL-3782); folding those side effects in
+// would mean unifying the payload type and is left as a follow-up.
+func (s *TaskService) broadcastIssueUpdated(issue db.Issue, prevStatus string) {
 	prefix := s.getIssuePrefix(issue.WorkspaceID)
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventIssueUpdated,
 		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
 		ActorType:   "system",
 		ActorID:     "",
-		Payload:     map[string]any{"issue": issueToMap(issue, prefix)},
+		Payload: map[string]any{
+			"issue":          issueToMap(issue, prefix),
+			"status_changed": prevStatus != issue.Status,
+			"prev_status":    prevStatus,
+		},
 	})
 }
 
@@ -2142,6 +2726,7 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 	if err != nil {
 		return
 	}
+	s.CancelDeferredEscalationsForIssueAgent(ctx, issueID, agentID)
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventCommentCreated,
 		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
