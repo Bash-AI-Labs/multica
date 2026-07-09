@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon"
 )
 
@@ -233,6 +236,70 @@ func TestPrintDiskUsageOtherRootsHintSkipsExplicitRootOverride(t *testing.T) {
 	if got := out.String(); got != "" {
 		t.Fatalf("hint output = %q, want no hint for explicit root override", got)
 	}
+}
+
+// TestResolveDaemonServerURL locks the backend-URL precedence the daemon uses:
+// an explicit --server-url flag wins, then a named profile's stored server_url
+// (so `make daemon --profile <self-host>` reaches the configured remote backend
+// instead of the localhost MULTICA_SERVER_URL the Makefile exports), then the
+// ambient MULTICA_SERVER_URL env, then the default profile's stored config.
+func TestResolveDaemonServerURL(t *testing.T) {
+	newCmd := func(profile, flagURL string) *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().String("server-url", "", "")
+		c.Flags().String("profile", "", "")
+		if profile != "" {
+			_ = c.Flags().Set("profile", profile)
+		}
+		if flagURL != "" {
+			_ = c.Flags().Set("server-url", flagURL)
+		}
+		return c
+	}
+
+	t.Run("named profile config beats ambient env", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MULTICA_SERVER_URL", "ws://localhost:8080/ws")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: "https://self.ts.net"}, "local"); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveDaemonServerURL(newCmd("local", ""), "local"); got != "https://self.ts.net" {
+			t.Fatalf("got %q, want named-profile config URL", got)
+		}
+	})
+
+	t.Run("explicit flag wins over profile config and env", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MULTICA_SERVER_URL", "ws://localhost:8080/ws")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: "https://self.ts.net"}, "local"); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveDaemonServerURL(newCmd("local", "https://flag.example"), "local"); got != "https://flag.example" {
+			t.Fatalf("got %q, want explicit flag URL", got)
+		}
+	})
+
+	t.Run("default profile keeps env precedence over stored config", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MULTICA_SERVER_URL", "ws://localhost:8080/ws")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: "https://stored.example"}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveDaemonServerURL(newCmd("", ""), ""); got != "ws://localhost:8080/ws" {
+			t.Fatalf("got %q, want env URL for default profile", got)
+		}
+	})
+
+	t.Run("falls through to stored config when no flag or env", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MULTICA_SERVER_URL", "")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: "https://stored.example"}, "local"); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveDaemonServerURL(newCmd("local", ""), "local"); got != "https://stored.example" {
+			t.Fatalf("got %q, want stored config URL", got)
+		}
+	})
 }
 
 func TestEnumerateDiskUsageRoots(t *testing.T) {
