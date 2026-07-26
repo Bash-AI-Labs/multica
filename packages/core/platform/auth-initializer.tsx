@@ -47,8 +47,9 @@ export function AuthInitializer({
     // reads this cookie, so it has to be present before the user hits submit.
     captureSignupSource();
 
-    // Fetch app config (CDN domain, PostHog key, …) in the background — non-blocking.
-    api
+    // Keep one shared request: config publication is non-blocking, but auth may
+    // await the same parsed response when it needs the local-mode decision.
+    const configPromise = api
       .getConfig()
       .then((cfg) => {
         if (cfg.cdn_domain) {
@@ -64,15 +65,16 @@ export function AuthInitializer({
           // Old servers omit this field — treat that as "creation allowed"
           // (the managed-cloud default) rather than blocking the UI.
           workspaceCreationDisabled: cfg.workspace_creation_disabled === true,
+          // Absent/false on the managed cloud and older servers → section hidden.
+          vcsIntegrationAvailable: cfg.vcs_integration_available === true,
         });
         configStore.getState().setDaemonConfig({
           daemonServerUrl: cfg.daemon_server_url,
           daemonAppUrl: cfg.daemon_app_url,
         });
-        if (cfg.local_mode_enabled) {
-          configStore.getState().setLocalModeEnabled(true);
-        }
+        configStore.getState().setLocalModeEnabled(cfg.local_mode_enabled === true);
         configStore.getState().setFeatureFlags(cfg.feature_flags);
+        configStore.getState().setServerVersion(cfg.server_version);
         if (cfg.posthog_key) {
           initAnalytics({
             key: cfg.posthog_key,
@@ -81,9 +83,11 @@ export function AuthInitializer({
             environment: cfg.analytics_environment,
           });
         }
+        return cfg;
       })
       .catch(() => {
         /* config is optional — legacy file card matching degrades gracefully */
+        return null;
       });
 
     const onAuthSuccess = (user: User) => {
@@ -97,6 +101,22 @@ export function AuthInitializer({
       resetAnalytics();
       useAuthStore.setState({ user: null, isLoading: false });
     };
+
+    const loginLocally = (failureMessage: string) =>
+      api
+        .localLogin()
+        .then(({ token: newToken, user }) => {
+          storage.setItem("multica_token", newToken);
+          api.setToken(newToken);
+          return api.listWorkspaces().then((wsList) => {
+            onAuthSuccess(user);
+            qc.setQueryData(workspaceKeys.list(), wsList);
+          });
+        })
+        .catch((err) => {
+          logger.error(failureMessage, err);
+          onAuthFailure();
+        });
 
     if (cookieAuth) {
       // Cookie mode: the HttpOnly cookie is sent automatically by the browser.
@@ -114,34 +134,11 @@ export function AuthInitializer({
         .catch(async (err) => {
           logger.error("cookie auth init failed", err);
           // In local mode, fall back to local-login when cookie auth fails.
-          // Check both the explicit prop and the server config (self-hosted
-          // deployments expose local_mode_enabled via /api/config).
-          let isLocalMode = localMode || configStore.getState().localModeEnabled;
-          if (!isLocalMode) {
-            // Config fetch may still be in flight — fetch it directly to decide
-            try {
-              const cfg = await api.getConfig();
-              isLocalMode = !!cfg.local_mode_enabled;
-            } catch {
-              // ignore — no local mode fallback available
-            }
-          }
+          // Await the shared config request if it is still in flight.
+          const cfg = await configPromise;
+          const isLocalMode = localMode === true || cfg?.local_mode_enabled === true;
           if (isLocalMode) {
-            api.localLogin()
-              .then(({ token: newToken, user }) => {
-                storage.setItem("multica_token", newToken);
-                api.setToken(newToken);
-                return api.listWorkspaces().then((wsList) => {
-                  onLogin?.();
-                  useAuthStore.setState({ user, isLoading: false });
-                  qc.setQueryData(workspaceKeys.list(), wsList);
-                });
-              })
-              .catch((localErr) => {
-                logger.error("local mode cookie auth fallback failed", localErr);
-                onLogout?.();
-                useAuthStore.setState({ user: null, isLoading: false });
-              });
+            void loginLocally("local mode cookie auth fallback failed");
             return;
           }
           onAuthFailure();
@@ -150,29 +147,16 @@ export function AuthInitializer({
     }
 
     // Token mode: read from localStorage (Electron / legacy).
-    let token = storage.getItem("multica_token");
-    if (!token && localMode) {
-      // Local mode: auto-login without credentials
-      api.localLogin()
-        .then(({ token: newToken, user }) => {
-          storage.setItem("multica_token", newToken);
-          api.setToken(newToken);
-          return api.listWorkspaces().then((wsList) => {
-            onLogin?.();
-            useAuthStore.setState({ user, isLoading: false });
-            qc.setQueryData(workspaceKeys.list(), wsList);
-          });
-        })
-        .catch((err) => {
-          logger.error("local mode auth init failed", err);
-          onLogout?.();
-          useAuthStore.setState({ user: null, isLoading: false });
-        });
-      return;
-    }
+    const token = storage.getItem("multica_token");
     if (!token) {
-      onLogout?.();
-      useAuthStore.setState({ isLoading: false });
+      void configPromise.then((cfg) => {
+        if (localMode === true || cfg?.local_mode_enabled === true) {
+          return loginLocally("local mode auth init failed");
+        }
+        onLogout?.();
+        useAuthStore.setState({ isLoading: false });
+        return undefined;
+      });
       return;
     }
 

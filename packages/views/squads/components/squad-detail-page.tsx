@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
@@ -8,10 +8,9 @@ import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { isImeComposing } from "@multica/core/utils";
+import { getShortcut, shortcutMatchesEvent } from "@multica/core/shortcuts";
 import { useTimeAgo } from "../../i18n";
 import { agentListOptions, memberListOptions, squadMemberStatusOptions, workspaceKeys } from "@multica/core/workspace/queries";
-import { runtimeListOptions } from "@multica/core/runtimes";
-import { CreateAgentDialog } from "../../agents/components/create-agent-dialog";
 import { useNavigation } from "../../navigation";
 import { AppLink } from "../../navigation";
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
@@ -60,7 +59,7 @@ import {
 } from "../../issues/components/pickers/property-picker";
 import { ChevronDown, UserPlus } from "lucide-react";
 import { toast } from "sonner";
-import type { Squad, SquadMember, SquadMemberStatus, SquadMemberStatusValue, Agent, CreateAgentRequest, MemberWithUser } from "@multica/core/types";
+import type { Squad, SquadMember, SquadMemberStatus, SquadMemberStatusValue, Agent, MemberWithUser } from "@multica/core/types";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
@@ -102,10 +101,6 @@ export function SquadDetailPage() {
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: wsMembers = [] } = useQuery(memberListOptions(wsId));
 
-  // Runtimes are only fetched when the Create Agent dialog might open;
-  // gating on canManage below means users who can't manage this squad never
-  // trigger the request. The runtime list mirrors the agents page so the
-  // picker (and the "only my runtimes" filter) behaves identically here.
   const currentUser = useAuthStore((s) => s.user);
   const myRole = useMemo(() => {
     if (!currentUser) return null;
@@ -120,13 +115,7 @@ export function SquadDetailPage() {
   const canManage =
     isWorkspaceAdmin || (!!currentUser && squad?.creator_id === currentUser.id);
 
-  const { data: runtimes = [], isLoading: runtimesLoading } = useQuery({
-    ...runtimeListOptions(wsId),
-    enabled: !!wsId && canManage,
-  });
-
   const [showAddMember, setShowAddMember] = useState(false);
-  const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
 
   const updateSquadMut = useMutation({
@@ -187,25 +176,6 @@ export function SquadDetailPage() {
     onError: (err) =>
       toast.error(err instanceof Error && err.message ? err.message : "Failed to archive squad"),
   });
-
-  // CreateAgentDialog's onCreate contract: hit POST /api/agents and
-  // return the created agent so the dialog can run its skill follow-up.
-  // We deliberately do NOT navigate to the agent detail page (that's
-  // the agents-page behaviour) — the user clicked Create Agent from
-  // inside this squad, so the dialog will stay open just long enough
-  // to also call addSquadMember (handled by the dialog when squadId
-  // is set), then close the user back to Members where they can
-  // verify the new agent appeared. Cache-update keeps the agents list
-  // fresh for any pickers that read from it.
-  const handleCreateAgent = async (data: CreateAgentRequest): Promise<Agent> => {
-    const agent = await api.createAgent(data);
-    queryClient.setQueryData<Agent[]>(workspaceKeys.agents(wsId), (current = []) => {
-      const exists = current.some((a) => a.id === agent.id);
-      return exists ? current.map((a) => (a.id === agent.id ? agent : a)) : [...current, agent];
-    });
-    queryClient.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
-    return agent;
-  };
 
   const getEntityName = (type: string, id: string) => {
     if (type === "agent") return agents.find((a: Agent) => a.id === id)?.name ?? id.slice(0, 8);
@@ -273,7 +243,7 @@ export function SquadDetailPage() {
           isArchived={isArchived}
           getEntityName={getEntityName}
           onAddMemberClick={() => setShowAddMember(true)}
-          onCreateAgentClick={canManage ? () => setShowCreateAgent(true) : undefined}
+          onCreateAgentClick={canManage ? () => push(`${p.newAgent()}?squad=${encodeURIComponent(squadId)}`) : undefined}
           onSetLeader={(id) => setLeaderMut.mutate(id)}
           onRemoveMember={(m) => removeMemberMut.mutate(m)}
           onUpdateRole={async (m, role) => { await updateRoleMut.mutateAsync({ member: m, role }); }}
@@ -288,25 +258,6 @@ export function SquadDetailPage() {
           availableAgents={availableAgents}
           onClose={() => setShowAddMember(false)}
           onSubmit={async (input) => { await addMemberMut.mutateAsync(input); }}
-        />
-      )}
-
-      {/* Squad-scoped create flow: same dialog as the Agents page but
-          with squadId set, so the dialog runs api.addSquadMember after
-          api.createAgent and skips the agent-detail navigation. Only
-          mounted for users who can manage this squad (workspace owner/admin
-          or the creator); for everyone else the trigger never renders. The
-          newly created agent is owned by the creator, so it is always one
-          they can invoke and add to the squad. */}
-      {showCreateAgent && canManage && (
-        <CreateAgentDialog
-          runtimes={runtimes}
-          runtimesLoading={runtimesLoading}
-          members={wsMembers}
-          currentUserId={currentUser?.id ?? null}
-          squadId={squadId}
-          onClose={() => setShowCreateAgent(false)}
-          onCreate={handleCreateAgent}
         />
       )}
 
@@ -354,7 +305,7 @@ function SquadDetailSkeleton() {
       </PageHeader>
       <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto p-3 md:grid md:grid-cols-[280px_minmax(0,1fr)] md:gap-4 md:overflow-hidden md:p-6 lg:grid-cols-[320px_minmax(0,1fr)]">
         <div className="flex flex-col gap-4 rounded-lg border p-5">
-          <Skeleton className="h-16 w-16 rounded-lg" />
+          <Skeleton className="h-16 w-16 rounded-full" />
           <Skeleton className="h-5 w-40" />
           <Skeleton className="h-3 w-full" />
           <div className="space-y-2">
@@ -389,8 +340,8 @@ function SquadHeaderAvatar({ squad, initials }: { squad: Squad; initials: string
       name={squad.name}
       initials={initials}
       avatarUrl={resolvePublicFileUrl(squad.avatar_url)}
-      size={16}
-      className="rounded"
+      size="sm"
+      className="shrink-0"
     />
   );
 }
@@ -400,14 +351,13 @@ function SquadHeaderAvatar({ squad, initials }: { squad: Squad; initials: string
 // affordance.
 function SquadStaticAvatar({ squad, initials }: { squad: Squad; initials: string }) {
   return (
-    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-muted">
+    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-full bg-muted">
       {squad.avatar_url ? (
         <ActorAvatarBase
           name={squad.name}
           initials={initials}
           avatarUrl={resolvePublicFileUrl(squad.avatar_url)}
-          size={64}
-          className="rounded-none"
+          size="2xl"
         />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-muted-foreground">
@@ -599,7 +549,7 @@ function AddMemberDialog({
             <Popover open={pickerOpen} onOpenChange={(v) => { setPickerOpen(v); if (!v) setPickerFilter(""); }}>
               <PopoverTrigger className="flex w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 mt-1 text-left text-sm transition-colors hover:bg-muted">
                 {target ? (
-                  <ActorAvatar actorType={target.type} actorId={target.id} size={20} />
+                  <ActorAvatar actorType={target.type} actorId={target.id} size="sm" />
                 ) : (
                   <UserPlus className="h-4 w-4 shrink-0 text-muted-foreground" />
                 )}
@@ -637,7 +587,7 @@ function AddMemberDialog({
                             setPickerFilter("");
                           }}
                         >
-                          <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
+                          <ActorAvatar actorType="member" actorId={m.user_id} size="sm" />
                           <span>{m.name}</span>
                         </PickerItem>
                       ))}
@@ -655,7 +605,7 @@ function AddMemberDialog({
                             setPickerFilter("");
                           }}
                         >
-                          <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
+                          <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
                           <span>{a.name}</span>
                         </PickerItem>
                       ))}
@@ -837,7 +787,7 @@ function SquadDetailInspector({
         <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
           <InspectorRow label="Leader">
             <span className="flex min-w-0 items-center gap-1.5">
-              <ActorAvatar actorType="agent" actorId={squad.leader_id} size={14} />
+              <ActorAvatar actorType="agent" actorId={squad.leader_id} size="xs" />
               <span className="truncate">{leaderName}</span>
             </span>
           </InspectorRow>
@@ -846,7 +796,7 @@ function SquadDetailInspector({
           </InspectorRow>
           <InspectorRow label="Created by">
             <span className="flex min-w-0 items-center gap-1.5">
-              <ActorAvatar actorType="member" actorId={squad.creator_id} size={14} />
+              <ActorAvatar actorType="member" actorId={squad.creator_id} size="xs" />
               <span className="truncate">{creatorName}</span>
             </span>
           </InspectorRow>
@@ -926,10 +876,13 @@ function SquadDescriptionEditorBody({
   const { t } = useT("squads");
   const [draft, setDraft] = useState(initialValue);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const dirty = draft !== initialValue;
 
   const commit = async () => {
+    if (savingRef.current) return;
     if (!dirty) { onClose(); return; }
+    savingRef.current = true;
     setSaving(true);
     try {
       await onSave(draft);
@@ -937,6 +890,7 @@ function SquadDescriptionEditorBody({
     } catch {
       // toast handled by parent's mutation
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -954,8 +908,8 @@ function SquadDescriptionEditorBody({
         rows={6}
         onKeyDown={(e) => {
           if (e.key === "Escape") { onClose(); return; }
-          if (isImeComposing(e)) return;
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          if (e.defaultPrevented || e.repeat || isImeComposing(e)) return;
+          if (shortcutMatchesEvent(getShortcut("send"), e.nativeEvent)) {
             e.preventDefault();
             void commit();
           }
@@ -1214,7 +1168,7 @@ function SquadMembersTab({
               <ActorAvatar
                 actorType={m.member_type}
                 actorId={m.member_id}
-                size={32}
+                size="lg"
                 showStatusDot
                 enableHoverCard={m.member_type === "agent"}
                 hoverCardVariant="live"
@@ -1399,7 +1353,7 @@ function SquadInstructionsTab({
       >
         <ContentEditor
           key={squad.id}
-          defaultValue={value}
+          value={value}
           onUpdate={canManage ? setValue : () => {}}
           placeholder={
             canManage
