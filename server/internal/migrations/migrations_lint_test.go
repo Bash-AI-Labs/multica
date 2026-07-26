@@ -19,13 +19,15 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"026": {"026_comment_reactions", "026_task_messages"},
 	"029": {"029_attachment", "029_daemon_token", "029_drop_daemon_pairing"},
 	"032": {"032_drop_agent_triggers", "032_issue_search_index", "032_runtime_owner", "032_task_usage"},
-	"033": {"033_chat", "033_comment_search_index"},
+	"033": {"033_agent_model", "033_chat", "033_comment_search_index"},
 	"035": {"035_project_priority", "035_task_queue_issue_id_index"},
 	"040": {"040_agent_custom_env", "040_chat_unread_since"},
 	"041": {"041_agent_custom_args", "041_workspace_invitation"},
 	"043": {"043_audit_reserved_slugs", "043_fix_orphaned_autopilot_runs"},
 	"046": {"046_agent_mcp_config", "046_agent_unique_name", "046_drop_runtime_usage"},
-	"050": {"050_add_onboarded_at_to_users", "050_agent_model", "050_issue_first_executed_at"},
+	"049": {"049_audit_legacy_reserved_slugs", "049_workspace_webhook"},
+	"050": {"050_add_onboarded_at_to_users", "050_agent_model", "050_issue_first_executed_at", "050_runtime_available_models"},
+	"051": {"051_add_onboarding_state_to_users", "051_integrations"},
 	"060": {"060_add_user_language", "060_agent_description_length", "060_chat_session_runtime_id", "060_issue_origin_quick_create"},
 	"065": {"065_backfill_onboarded_at", "065_project_resources"},
 	"069": {"069_comment_resolved_at", "069_drop_task_last_heartbeat"},
@@ -45,6 +47,7 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"124": {"124_autopilot_run_planned_at", "124_channel_generalization", "124_task_prepare_lease"},
 	"127": {"127_issue_pull_request_reference_only", "127_task_squad_id", "127_user_composio_connection"},
 	"128": {"128_agent_task_queue_runtime_mcp_overlay", "128_autopilot_collaborator", "128_comment_routing_escalation"},
+	"157": {"157_agent_model_drop_not_null", "157_agent_task_delivered_comments"},
 }
 
 var migrationPrefixPattern = regexp.MustCompile(`^(\d+)_`)

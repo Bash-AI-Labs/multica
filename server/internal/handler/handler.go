@@ -23,6 +23,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composio "github.com/multica-ai/multica/server/internal/integrations/composio"
+	"github.com/multica-ai/multica/server/internal/integrations/ghsnapshot"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -31,6 +32,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/multica-ai/multica/server/pkg/llm"
@@ -65,8 +67,18 @@ type Config struct {
 	// invitation only. The public /api/config endpoint mirrors this flag so
 	// the UI can hide every "Create workspace" affordance — see #3433.
 	DisableWorkspaceCreation bool
+	// VCSIntegrationEnabled gates the self-hosted Git provider integration
+	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
+	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
+	// intended for self-hosted Multica only (where Multica and the Git instance
+	// can share a network), and is left off on the managed cloud — connect,
+	// rotate, and webhook handlers reject when it is false, and /api/config
+	// omits it so the UI hides the whole section rather than showing a
+	// "missing key" message a cloud user cannot act on. Populated from
+	// MULTICA_VCS_INTEGRATION_ENABLED; the self-host compose defaults it on.
+	VCSIntegrationEnabled bool
 	// PublicURL is the absolute base URL the API is reachable at from the
-	// public internet, with no trailing slash (e.g. "https://app.multica.ai").
+	// public internet, with no trailing slash (e.g. "https://multica.ai").
 	// Used only to build webhook_url responses for autopilot webhook triggers
 	// — never for auth, routing, or workspace resolution. Empty when unset,
 	// in which case clients fall back to webhook_path + their own origin.
@@ -107,6 +119,11 @@ type Config struct {
 	LLMAPIKey       string
 	LLMBaseURL      string
 	LLMDefaultModel string
+	// ServerVersion is the build version of the running API binary (the same
+	// value main.go stamps via -X main.version and reports on /metrics).
+	// Surfaced through /api/config so self-hosted operators can confirm which
+	// server build is deployed. Empty in dev builds.
+	ServerVersion string
 }
 
 type cloudRuntimeProxy interface {
@@ -118,40 +135,46 @@ type RuntimeProfileRefreshNotifier interface {
 	NotifyRuntimeProfilesChanged(workspaceID, profileID string)
 }
 
+type WorkspaceSetRefreshNotifier interface {
+	NotifyWorkspacesChanged(userID string)
+}
+
 type Handler struct {
-	Queries               *db.Queries
-	DB                    dbExecutor
-	TxStarter             txStarter
-	Hub                   *realtime.Hub
-	DaemonHub             *daemonws.Hub
-	DaemonProfileRefresh  RuntimeProfileRefreshNotifier
-	Bus                   *events.Bus
-	TaskService           *service.TaskService
-	IssueService          *service.IssueService
-	AutopilotService      *service.AutopilotService
-	IntegrationService    *service.IntegrationService
-	EmailService          *service.EmailService
-	UpdateStore           UpdateStore
-	ModelListStore        ModelListStore
-	LocalSkillListStore   LocalSkillListStore
-	LocalSkillImportStore LocalSkillImportStore
-	FeatureFlags          *featureflag.Service
-	LivenessStore         LivenessStore
-	HeartbeatScheduler    HeartbeatScheduler
-	Storage               storage.Storage
-	CFSigner              *auth.CloudFrontSigner
-	Analytics             analytics.Client
+	Queries                *db.Queries
+	DB                     dbExecutor
+	TxStarter              txStarter
+	Hub                    *realtime.Hub
+	DaemonHub              *daemonws.Hub
+	DaemonProfileRefresh   RuntimeProfileRefreshNotifier
+	DaemonWorkspaceRefresh WorkspaceSetRefreshNotifier
+	Bus                    *events.Bus
+	TaskService            *service.TaskService
+	IssueService           *service.IssueService
+	AutopilotService       *service.AutopilotService
+	EmailService           *service.EmailService
+	UpdateStore            UpdateStore
+	ModelListStore         ModelListStore
+	LocalSkillListStore    LocalSkillListStore
+	LocalSkillImportStore  LocalSkillImportStore
+	FeatureFlags           *featureflag.Service
+	LivenessStore          LivenessStore
+	HeartbeatScheduler     HeartbeatScheduler
+	Storage                storage.Storage
+	CFSigner               *auth.CloudFrontSigner
+	Analytics              analytics.Client
 	// Metrics is the shared business-metrics collector built by main.go.
 	// May be nil in tests / self-hosted with the metrics listener disabled;
 	// every Record* method is nil-safe and obsmetrics.RecordEvent treats a
 	// nil Metrics as "PostHog only".
-	Metrics              *obsmetrics.BusinessMetrics
-	PATCache             *auth.PATCache
-	DaemonTokenCache     *auth.DaemonTokenCache
-	MembershipCache      *auth.MembershipCache
-	WebhookRateLimiter   WebhookRateLimiter
-	WebhookIPRateLimiter WebhookRateLimiter
-	CloudRuntime         cloudRuntimeProxy
+	Metrics                      *obsmetrics.BusinessMetrics
+	PATCache                     *auth.PATCache
+	DaemonTokenCache             *auth.DaemonTokenCache
+	MembershipCache              *auth.MembershipCache
+	WebhookRateLimiter           WebhookRateLimiter
+	WebhookIPRateLimiter         WebhookRateLimiter
+	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
+	WebhookDeliveryWorker        *WebhookDeliveryWorker
+	CloudRuntime                 cloudRuntimeProxy
 	// Lark integration. All three are nil when the Lark master key
 	// (MULTICA_LARK_SECRET_KEY) is unset; the corresponding HTTP
 	// handlers return 503 in that case so a misconfigured self-host
@@ -217,7 +240,21 @@ type Handler struct {
 	// Config); when unconfigured its Enabled() reports false and callers fall
 	// back silently.
 	LLM *llm.Client
-	cfg Config
+	// VCSSecretBox encrypts/decrypts per-workspace Git provider access tokens and
+	// webhook secrets at rest (Forgejo / Gitea / GitLab). Nil when
+	// MULTICA_VCS_SECRET_KEY is unset; the connect/webhook handlers return 503
+	// in that case so a misconfigured self-host deployment surfaces a clear
+	// error rather than silently storing plaintext. Wired in
+	// cmd/server/router.go after New.
+	VCSSecretBox *secretbox.Box
+	// PRRefresh drives the GitHub API snapshot pipeline for PR cards (MUL-5265):
+	// webhook / page-visit / TTL triggers → authenticated GraphQL fetch →
+	// head-SHA-guarded atomic snapshot write. Always non-nil, but inert (every
+	// trigger is a no-op) when GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY are unset,
+	// so the feature degrades cleanly on deployments without a private key.
+	// Wired in cmd/server/router.go after New.
+	PRRefresh *ghsnapshot.Manager
+	cfg       Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
@@ -244,37 +281,39 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		daemonHub = daemonHubs[0]
 	}
 	var daemonProfileRefresh RuntimeProfileRefreshNotifier
+	var daemonWorkspaceRefresh WorkspaceSetRefreshNotifier
 	if daemonHub != nil {
 		daemonProfileRefresh = daemonHub
+		daemonWorkspaceRefresh = daemonHub
 	}
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
-	integrationSvc := service.NewIntegrationService(queries, txStarter, bus, taskSvc)
-	return &Handler{
-		Queries:               queries,
-		DB:                    executor,
-		TxStarter:             txStarter,
-		Hub:                   hub,
-		DaemonHub:             daemonHub,
-		DaemonProfileRefresh:  daemonProfileRefresh,
-		Bus:                   bus,
-		TaskService:           taskSvc,
-		IssueService:          service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
-		AutopilotService:      service.NewAutopilotService(queries, txStarter, bus, taskSvc),
-		IntegrationService:    integrationSvc,
-		EmailService:          emailService,
-		UpdateStore:           NewInMemoryUpdateStore(),
-		ModelListStore:        NewInMemoryModelListStore(),
-		LocalSkillListStore:   NewInMemoryLocalSkillListStore(),
-		LocalSkillImportStore: NewInMemoryLocalSkillImportStore(),
-		LivenessStore:         NewNoopLivenessStore(),
-		HeartbeatScheduler:    NewPassthroughHeartbeatScheduler(queries),
-		Storage:               store,
-		CFSigner:              cfSigner,
-		Analytics:             analyticsClient,
-		WebhookRateLimiter:    NewMemoryWebhookRateLimiter(DefaultWebhookRateLimit()),
-		WebhookIPRateLimiter:  NewMemoryWebhookIPRateLimiter(DefaultWebhookIPRateLimit()),
+	h := &Handler{
+		Queries:                      queries,
+		DB:                           executor,
+		TxStarter:                    txStarter,
+		Hub:                          hub,
+		DaemonHub:                    daemonHub,
+		DaemonProfileRefresh:         daemonProfileRefresh,
+		DaemonWorkspaceRefresh:       daemonWorkspaceRefresh,
+		Bus:                          bus,
+		TaskService:                  taskSvc,
+		IssueService:                 service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
+		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
+		EmailService:                 emailService,
+		UpdateStore:                  NewInMemoryUpdateStore(),
+		ModelListStore:               NewInMemoryModelListStore(),
+		LocalSkillListStore:          NewInMemoryLocalSkillListStore(),
+		LocalSkillImportStore:        NewInMemoryLocalSkillImportStore(),
+		LivenessStore:                NewNoopLivenessStore(),
+		HeartbeatScheduler:           NewPassthroughHeartbeatScheduler(queries),
+		Storage:                      store,
+		CFSigner:                     cfSigner,
+		Analytics:                    analyticsClient,
+		WebhookRateLimiter:           NewMemoryWebhookRateLimiter(DefaultWebhookRateLimit()),
+		WebhookIPRateLimiter:         NewMemoryWebhookIPRateLimiter(DefaultWebhookIPRateLimit()),
+		WebhookAbsoluteIPRateLimiter: NewMemoryWebhookAbsoluteIPRateLimiter(DefaultWebhookAbsoluteIPRateLimit()),
 		CloudRuntime: cloudruntime.NewClient(cloudruntime.Config{
 			BaseURL: cfg.CloudRuntimeFleetURL,
 			Timeout: cfg.CloudRuntimeFleetTimeout,
@@ -286,6 +325,20 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		}),
 		cfg: cfg,
 	}
+	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
+
+	// GitHub API snapshot pipeline for PR cards (MUL-5265). Built
+	// unconditionally but inert (every trigger no-ops) when the App private key
+	// is unconfigured, so the feature degrades cleanly. main.go calls
+	// h.PRRefresh.Start(ctx) to launch its worker pool + TTL sweeper.
+	ghClient, err := ghsnapshot.NewClientFromEnv()
+	if err != nil {
+		// Malformed key is operator-actionable; the pipeline stays disabled.
+		slog.Warn("github: PR snapshot pipeline disabled (invalid App private key)", "err", err)
+	}
+	h.PRRefresh = ghsnapshot.NewManager(ghClient, queries, txStarter, h.broadcastPRSnapshotApplied)
+
+	return h
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -372,6 +425,18 @@ func uuidsToStrings(us []pgtype.UUID) []string {
 	return out
 }
 
+// uuidStringsOrEmpty preserves the distinction between a modern, authoritative
+// empty UUID-array value (`[]`) and a field omitted by a legacy server. Delivery
+// receipts use this so clients never mistake zero delivered comments for an
+// unknown receipt and fall back to the enqueue-time plan.
+func uuidStringsOrEmpty(us []pgtype.UUID) []string {
+	out := uuidsToStrings(us)
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
 func int8ToPtr(v pgtype.Int8) *int64 { return util.Int8ToPtr(v) }
 func int4ToPtr(v pgtype.Int4) *int32 { return util.Int4ToPtr(v) }
 func ptrToInt4(v *int32) pgtype.Int4 { return util.PtrToInt4(v) }
@@ -414,6 +479,23 @@ func (h *Handler) publish(eventType, workspaceID, actorType, actorID string, pay
 		ActorID:     actorID,
 		Payload:     payload,
 	})
+}
+
+func (h *Handler) notifyDaemonWorkspacesChanged(userIDs ...string) {
+	if h.DaemonWorkspaceRefresh == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		h.DaemonWorkspaceRefresh.NotifyWorkspacesChanged(userID)
+	}
 }
 
 // publishTask is publish() plus a TaskID hint so the realtime layer can route
@@ -797,6 +879,10 @@ func (h *Handler) loadAgentForUser(w http.ResponseWriter, r *http.Request, agent
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
+		return db.Agent{}, false
+	}
+	if agent.Kind != "user" {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return db.Agent{}, false
 	}
