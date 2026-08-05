@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
-	"github.com/multica-ai/multica/server/internal/integrations/channel"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -30,6 +30,7 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	"github.com/multica-ai/multica/server/pkg/redact"
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // ---------------------------------------------------------------------------
@@ -307,6 +308,49 @@ func (h *Handler) inheritMachineCustomName(ctx context.Context, rt db.AgentRunti
 	return updated
 }
 
+var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
+
+// upsertRuntimeWithProfile serializes custom-runtime registration with profile
+// deletion. The profile row remains KEY SHARE locked until the runtime upsert
+// commits; DeleteRuntimeProfile takes a conflicting UPDATE lock before it
+// enumerates runtime rows. This closes the stale-read window where deletion
+// could miss an instance inserted by a concurrently registering daemon.
+func (h *Handler) upsertRuntimeWithProfile(
+	ctx context.Context,
+	workspaceID, profileID pgtype.UUID,
+	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
+) (db.UpsertAgentRuntimeWithProfileRow, db.RuntimeProfile, error) {
+	var row db.UpsertAgentRuntimeWithProfileRow
+	var profile db.RuntimeProfile
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return row, profile, fmt.Errorf("begin profile runtime registration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+
+	profile, err = qtx.LockRuntimeProfileForRegistration(ctx, db.LockRuntimeProfileForRegistrationParams{
+		ID:          profileID,
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return row, profile, fmt.Errorf("lock runtime profile: %w", err)
+	}
+	if !profile.Enabled {
+		return row, profile, errRuntimeProfileDisabled
+	}
+
+	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	if err != nil {
+		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return row, profile, fmt.Errorf("commit profile runtime registration: %w", err)
+	}
+	return row, profile, nil
+}
+
 // sharedDaemonCustomName returns the machine-level name shared by all of a
 // daemon's runtimes — the same rule the frontend's sharedCustomName applies:
 // every runtime must carry the identical non-empty custom_name. Returns
@@ -429,32 +473,33 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			// The profile must exist in this workspace and be enabled. Trust
 			// the profile's stored protocol_family over the daemon-sent type so
 			// the provider used for task routing cannot drift from the profile.
-			profile, perr := h.Queries.GetRuntimeProfileForWorkspace(r.Context(), db.GetRuntimeProfileForWorkspaceParams{
-				ID:          profileUUID,
-				WorkspaceID: wsUUID,
-			})
-			if perr != nil {
+			prow, profile, err := h.upsertRuntimeWithProfile(
+				r.Context(),
+				wsUUID,
+				profileUUID,
+				func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
+					return db.UpsertAgentRuntimeWithProfileParams{
+						WorkspaceID: wsUUID,
+						DaemonID:    strToText(req.DaemonID),
+						Name:        name,
+						RuntimeMode: "local",
+						Provider:    profile.ProtocolFamily,
+						Status:      status,
+						DeviceInfo:  deviceInfo,
+						Metadata:    metadata,
+						OwnerID:     ownerID,
+						ProfileID:   profileUUID,
+					}
+				},
+			)
+			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+runtime.ProfileID)
 				return
 			}
-			if !profile.Enabled {
+			if errors.Is(err, errRuntimeProfileDisabled) {
 				writeError(w, http.StatusConflict, "runtime profile is disabled: "+runtime.ProfileID)
 				return
 			}
-			provider = profile.ProtocolFamily
-
-			prow, err := h.Queries.UpsertAgentRuntimeWithProfile(r.Context(), db.UpsertAgentRuntimeWithProfileParams{
-				WorkspaceID: wsUUID,
-				DaemonID:    strToText(req.DaemonID),
-				Name:        name,
-				RuntimeMode: "local",
-				Provider:    provider,
-				Status:      status,
-				DeviceInfo:  deviceInfo,
-				Metadata:    metadata,
-				OwnerID:     ownerID,
-				ProfileID:   profileUUID,
-			})
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -468,6 +513,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to register runtime: "+err.Error())
 				return
 			}
+			provider = profile.ProtocolFamily
 			inserted = prow.Inserted
 			registered = db.AgentRuntime{
 				ID:             prow.ID,
@@ -590,46 +636,46 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		if !pok {
 			return
 		}
-		profile, perr := h.Queries.GetRuntimeProfileForWorkspace(r.Context(), db.GetRuntimeProfileForWorkspaceParams{
-			ID:          profileUUID,
-			WorkspaceID: wsUUID,
-		})
-		if perr != nil || !profile.Enabled {
-			continue
-		}
-		name := profile.DisplayName
-		if req.DeviceName != "" {
-			name = fmt.Sprintf("%s (%s)", name, req.DeviceName)
-		}
-		deviceInfo := strings.TrimSpace(req.DeviceName)
 		reason := strings.TrimSpace(failed.Reason)
 		if reason == "" {
 			reason = "custom runtime command could not be resolved"
 		}
 		commandName := strings.TrimSpace(failed.CommandName)
-		if commandName == "" {
-			commandName = profile.CommandName
-		}
-		metadata, _ := json.Marshal(map[string]any{
-			"version":                            "",
-			"cli_version":                        req.CLIVersion,
-			"launched_by":                        req.LaunchedBy,
-			"runtime_profile_registration_error": true,
-			"runtime_profile_failure_reason":     reason,
-			"command_name":                       commandName,
-		})
-		prow, err := h.Queries.UpsertAgentRuntimeWithProfile(r.Context(), db.UpsertAgentRuntimeWithProfileParams{
-			WorkspaceID: wsUUID,
-			DaemonID:    strToText(req.DaemonID),
-			Name:        name,
-			RuntimeMode: "local",
-			Provider:    profile.ProtocolFamily,
-			Status:      "offline",
-			DeviceInfo:  deviceInfo,
-			Metadata:    metadata,
-			OwnerID:     ownerID,
-			ProfileID:   profileUUID,
-		})
+		prow, _, err := h.upsertRuntimeWithProfile(
+			r.Context(),
+			wsUUID,
+			profileUUID,
+			func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
+				name := profile.DisplayName
+				if req.DeviceName != "" {
+					name = fmt.Sprintf("%s (%s)", name, req.DeviceName)
+				}
+				resolvedCommandName := commandName
+				if resolvedCommandName == "" {
+					resolvedCommandName = profile.CommandName
+				}
+				metadata, _ := json.Marshal(map[string]any{
+					"version":                            "",
+					"cli_version":                        req.CLIVersion,
+					"launched_by":                        req.LaunchedBy,
+					"runtime_profile_registration_error": true,
+					"runtime_profile_failure_reason":     reason,
+					"command_name":                       resolvedCommandName,
+				})
+				return db.UpsertAgentRuntimeWithProfileParams{
+					WorkspaceID: wsUUID,
+					DaemonID:    strToText(req.DaemonID),
+					Name:        name,
+					RuntimeMode: "local",
+					Provider:    profile.ProtocolFamily,
+					Status:      "offline",
+					DeviceInfo:  strings.TrimSpace(req.DeviceName),
+					Metadata:    metadata,
+					OwnerID:     ownerID,
+					ProfileID:   profileUUID,
+				}
+			},
+		)
 		if err != nil {
 			slog.Warn("failed to record runtime profile registration failure",
 				"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
@@ -2012,6 +2058,12 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					src.SessionID.Valid && src.RuntimeID == task.RuntimeID {
 					resp.PriorSessionID = src.SessionID.String
 				}
+				// MUL-5305: if the source task withheld its Codex session because
+				// the rollout was missing, this rerun has nothing resumable from it
+				// — disclose the gap rather than silently starting fresh.
+				if src.SessionRolloutMissing {
+					resp.PriorSessionResumeUnavailable = true
+				}
 			}
 		} else if !task.ForceFreshSession {
 			// Non-rerun follow-up on the same issue: resume the most recent
@@ -2029,6 +2081,18 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 				if prior.WorkDir.Valid {
 					resp.PriorWorkDir = prior.WorkDir.String
 				}
+			}
+			// MUL-5305: if the most recent terminal task withheld its Codex
+			// session because the rollout was missing, GetLastTaskSession fell
+			// back to an older session (or none). Disclose the continuity gap so
+			// the next run tells the user the most recent turn's context could not
+			// be carried over — even when that older session resumes cleanly,
+			// which the resume-presence gate would otherwise pass silently.
+			if missing, err := h.Queries.GetLatestTaskRolloutMissing(r.Context(), db.GetLatestTaskRolloutMissingParams{
+				AgentID: task.AgentID,
+				IssueID: task.IssueID,
+			}); err == nil && missing {
+				resp.PriorSessionResumeUnavailable = true
 			}
 		}
 	}
@@ -2059,35 +2123,39 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			// is operating inside an IM conversation and not the Multica web app
 			// (MUL-3871). Empty for a web-only chat session.
 			//
-			// Every registered channel type is probed, not just Slack: a Feishu
-			// session writes the same channel_chat_session_binding row under
-			// channel_type='feishu' (lark/channel_store.go), so the Slack-only
-			// lookup used to report a Feishu chat as web-backed. Downstream that
-			// mis-flag made the brief inject `multica attachment upload` guidance
-			// into a conversation that cannot carry attachments at all (MUL-4899).
+			// The binding is read WITHOUT naming a channel. Every channel writes
+			// the same channel_chat_session_binding row and differs only in
+			// channel_type, and UNIQUE (chat_session_id) allows at most one, so
+			// the row itself is the answer. Enumerating candidate channels here
+			// was the bug twice over: the Slack-only lookup reported a Feishu
+			// chat as web-backed (MUL-4899), and the {slack, feishu} list that
+			// replaced it did the same to WeCom. Downstream that mis-flag makes
+			// the brief inject `multica attachment upload` guidance into a
+			// conversation that cannot carry attachments at all.
 			//
 			// ChatInThread stays Slack-only on purpose. It selects between
 			// `multica chat history` and `multica chat thread`, and those two
 			// endpoints are hardwired to h.SlackHistory (chat_history.go) — there
-			// is no Feishu history reader, so the flag has nothing to select
-			// between on any other channel and must not imply one exists.
-			for _, channelType := range []channel.Type{slack.TypeSlack, channel.TypeFeishu} {
-				binding, berr := h.Queries.GetChannelChatSessionBindingBySession(r.Context(), db.GetChannelChatSessionBindingBySessionParams{
-					ChatSessionID: cs.ID,
-					ChannelType:   string(channelType),
-				})
-				if berr != nil {
-					continue
-				}
-				resp.ChatChannelType = string(channelType)
-				if channelType == slack.TypeSlack {
+			// is no history reader on any other channel, so the flag has nothing
+			// to select between there and must not imply one exists.
+			//
+			// chat_type rides along on the same row. It is what lets the
+			// per-turn prompt tell the agent whether this chat_session is a room
+			// shared by many people or a 1:1 with the bot; the prompt used to
+			// describe every chat run as a private 1:1 whatever the room. The
+			// shared session service writes the column for every channel
+			// (channel/engine/session.go), so no channel needs naming here
+			// either.
+			if binding, berr := h.Queries.GetChannelChatSessionBindingBySessionAny(r.Context(), cs.ID); berr == nil {
+				resp.ChatChannelType = binding.ChannelType
+				resp.ChatType = binding.ChatType
+				if binding.ChannelType == string(slack.TypeSlack) {
 					// The latest trigger was a thread reply iff its reply-target
 					// thread (last_thread_id) differs from its own message id (a
 					// top-level @mention records its own ts as both).
 					resp.ChatInThread = binding.LastThreadID.Valid && binding.LastThreadID.String != "" &&
 						binding.LastThreadID.String != binding.LastMessageID.String
 				}
-				break
 			}
 			// A web chat can opt into the same durable project context as an
 			// issue-bound task. Revalidate the soft reference in this workspace at
@@ -2164,23 +2232,33 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 						resp.PriorWorkDir = prior.WorkDir.String
 					}
 				}
+				// MUL-5305: if the most recent terminal task on this chat session
+				// withheld its Codex session (rollout missing), we resumed an older
+				// session (or none) above — disclose the continuity gap so the next
+				// turn tells the user the most recent turn's context is missing.
+				if missing, err := h.Queries.GetLatestChatTaskRolloutMissing(r.Context(), cs.ID); err == nil && missing {
+					resp.PriorSessionResumeUnavailable = true
+				}
 			}
 			// Resolve the user-message input batch for this run. A task-owned
-			// direct-chat task (chat_input_task_id set, MUL-4351) reads exactly
-			// the user messages tagged with its own input owner, so a message
-			// that arrived after this turn was sealed can never be absorbed here.
-			// Legacy and channel (Slack/Lark) tasks carry a NULL owner and keep
-			// the trailing-message selector — the run of user messages after the
-			// last assistant row, which also covers a debounced burst (MUL-2968:
-			// "看上海天气" then "还有青岛" must both be delivered) — so a rolling
-			// deploy never replays their history. Attachments are collected per
-			// included message so the agent can `multica attachment download <id>`
-			// (the inline markdown URL is signed + 30-min expiring on the CDN).
+			// task (chat_input_task_id set) reads exactly the user messages
+			// tagged with its own input owner, so a message that arrived after
+			// this turn was sealed can never be absorbed here. Direct-chat
+			// tasks have owned their single message since MUL-4351; channel
+			// (Slack/Lark) tasks now seal their trailing batch at enqueue too.
+			// Only legacy tasks created before that deploy carry a NULL owner
+			// and keep the trailing-message selector — the run of user messages
+			// after the last assistant row, which also covers a debounced burst
+			// (MUL-2968: "看上海天气" then "还有青岛" must both be delivered) —
+			// so a rolling deploy never replays their history. Attachments are
+			// collected per included message so the agent can
+			// `multica attachment download <id>` (the inline markdown URL is
+			// signed + 30-min expiring on the CDN).
 			var unanswered []db.ChatMessage
 			var inputLoadErr error
 			if task.ChatInputTaskID.Valid {
 				unanswered, inputLoadErr = h.Queries.ListChatInputMessages(r.Context(), task.ChatInputTaskID)
-			} else if msgs, err := h.Queries.ListChatMessages(r.Context(), cs.ID); err == nil {
+			} else if msgs, err := h.Queries.ListChatMessagesForLegacyTask(r.Context(), cs.ID); err == nil {
 				unanswered = trailingUserMessages(msgs)
 			} else {
 				inputLoadErr = err
@@ -2562,7 +2640,7 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	// process instead of its own credential, so any API call the agent
 	// makes — even one that strips X-Agent-ID / X-Task-ID headers — is
 	// recognized server-side as actor=agent, closing the lateral-movement
-	// path on owner-only endpoints (e.g. `/api/agents/{id}/env`). Runtime
+	// path on human-only endpoints (e.g. `/api/agents/{id}/env`). Runtime
 	// owner is required because task tokens are still bound to an owning user;
 	// without one, fail the claim explicitly instead of letting the daemon
 	// fall back to a member/owner credential. MUL-3292.
@@ -2708,6 +2786,9 @@ func (h *Handler) ResolveTaskSkillBundles(w http.ResponseWriter, r *http.Request
 // these, not just the latest. Every completed or failed run writes an
 // assistant row, so the anchor advances one turn at a time; the result is the
 // whole slice on the first turn and exactly the new message(s) thereafter.
+// Legacy channel tasks also stop at the first unexpired media marker so an old
+// run cannot consume a placeholder that has not been bound yet. New channel
+// tasks use task-owned input batches and do not depend on this fallback.
 func trailingUserMessages(msgs []db.ChatMessage) []db.ChatMessage {
 	start := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -2716,7 +2797,15 @@ func trailingUserMessages(msgs []db.ChatMessage) []db.ChatMessage {
 			break
 		}
 	}
-	return msgs[start:]
+	msgs = msgs[start:]
+	now := time.Now()
+	for i := range msgs {
+		pending := msgs[i].ChannelMediaPendingUntil
+		if pending.Valid && pending.Time.After(now) {
+			return msgs[:i]
+		}
+	}
+	return msgs
 }
 
 // ListPendingTasksByRuntime returns queued/dispatched tasks for a runtime.
@@ -2877,6 +2966,15 @@ type TaskCompleteRequest struct {
 	Output    string `json:"output"`
 	SessionID string `json:"session_id"` // Claude session ID for future resumption
 	WorkDir   string `json:"work_dir"`   // working directory used during execution
+	// SessionRolloutMissing: the daemon withheld this task's Codex session
+	// because its rollout was missing (MUL-5305). Clear the resume pointer and
+	// flag the continuity gap for the next claim.
+	SessionRolloutMissing bool `json:"session_rollout_missing,omitempty"`
+	// RetiredSessionID: a session this run proved unresumable and abandoned
+	// (GH #6066). Distinct from an empty SessionID, which only means "nothing
+	// to report" — this says "never hand this id to a later run". Older
+	// daemons omit it, which is exactly the pre-fix behaviour.
+	RetiredSessionID string `json:"retired_session_id,omitempty"`
 }
 
 func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
@@ -2894,8 +2992,39 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GH #6402: a daemon whose backend does not (yet) read the provider's
+	// structured terminal reason reports a context-exhausted run as a clean
+	// success, with the CLI's "your context window is full" notice as the
+	// answer. Re-route it to the failure path here so the fix does not have to
+	// wait for every installed daemon to update: an un-upgraded host would
+	// otherwise keep publishing that notice as the agent's reply AND keep the
+	// dead session pinned as the resume pointer, which is a permanently stuck
+	// (agent, issue) pair rather than a mislabelled row. Same argument, and the
+	// same shared classifier, as taskfailure.NormalizeDaemonReason on the fail
+	// boundary (MUL-5370). A current daemon classifies this before it ever calls
+	// /complete, so this branch is dead weight for it — by design.
+	if taskfailure.ContextExhaustedCompletion(req.Output) {
+		slog.Warn("complete task: output is a provider context-exhaustion notice, recording as failed",
+			"task_id", taskID,
+			"failure_reason", taskfailure.ReasonAgentContextOverflow,
+		)
+		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{
+			Error:                 req.Output,
+			FailureReason:         string(taskfailure.ReasonAgentContextOverflow),
+			SessionID:             req.SessionID,
+			WorkDir:               req.WorkDir,
+			SessionRolloutMissing: req.SessionRolloutMissing,
+			RetiredSessionID:      req.RetiredSessionID,
+		})
+		return
+	}
+
 	result, _ := json.Marshal(req)
-	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir)
+	// MUL-5305: SessionRolloutMissing is applied inside CompleteTask's terminal
+	// transaction (force session_id NULL + flag the row), so an auto-retry the
+	// same commit creates and wakes can never observe the withheld pointer or a
+	// missing continuity-gap flag.
+	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.SessionRolloutMissing, req.RetiredSessionID)
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized
@@ -3136,7 +3265,28 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 		// The first qualifying comment enqueues the follow-up task; later ones
 		// find it AlreadyPending and merge in, so all undelivered comments end
 		// up covered by a single bounded run.
-		h.enqueueCommentAgentTriggers(ctx, issue, c.ID, scoped)
+		//
+		// A BLOCKED replay must not be discarded (#5914, Elon round 8): the slot
+		// can be held by a task that will never see this comment (it predates that
+		// task and is not in its planned ids), so dropping the failure here is
+		// exactly how a promised follow-up is lost. Hand the obligation to that
+		// blocker instead, keeping it alive until some run provably covers it.
+		if res := h.enqueueCommentAgentTriggers(ctx, issue, c.ID, scoped)[agentID]; res.status == DispatchBlocked {
+			headSha := h.TaskService.ResolveIssueReviewSHAParam(ctx, task.IssueID)
+			if h.propagateUncoveredCommentObligation(ctx, issue, scoped[0], c.ID, headSha) {
+				slog.Info("reconcile comments on completion: replay blocked, obligation handed to the active task",
+					"issue_id", uuidToString(task.IssueID), "agent_id", agentID, "comment_id", uuidToString(c.ID))
+			} else {
+				// The slot is held by a DIFFERENT-head queued task: it can neither
+				// cover this comment nor accept it (merging would let an old-head
+				// run consume a new-head request — TEN-356). Today's schema has no
+				// safe place to park the obligation, so surface it loudly rather
+				// than let it disappear quietly.
+				slog.Error("reconcile comments on completion: replay blocked and obligation could not be handed off; comment needs a durable obligation record",
+					"issue_id", uuidToString(task.IssueID), "agent_id", agentID, "comment_id", uuidToString(c.ID),
+					"reason", res.reason)
+			}
+		}
 		scheduled++
 	}
 	if scheduled > 0 {
@@ -3503,6 +3653,15 @@ type TaskFailRequest struct {
 	SessionID     string `json:"session_id,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
+	// SessionRolloutMissing: the daemon withheld this task's Codex session
+	// because its rollout was missing (MUL-5305). Clear the resume pointer and
+	// flag the continuity gap for the next claim.
+	SessionRolloutMissing bool `json:"session_rollout_missing,omitempty"`
+	// RetiredSessionID: a session this run proved unresumable and abandoned
+	// (GH #6066). Distinct from an empty SessionID, which only means "nothing
+	// to report" — this says "never hand this id to a later run". Older
+	// daemons omit it, which is exactly the pre-fix behaviour.
+	RetiredSessionID string `json:"retired_session_id,omitempty"`
 }
 
 func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
@@ -3520,10 +3679,31 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason)
+	h.failTask(w, r, taskID, workspaceID, req)
+}
+
+// failTask records a terminal failure and writes the response. Shared by the
+// /fail endpoint and by CompleteTask's context-exhaustion normalization so a
+// run re-classified at the /complete boundary lands through exactly the same
+// transaction, token revocation and runtime wake-up as one the daemon reported
+// as failed itself.
+func (h *Handler) failTask(w http.ResponseWriter, r *http.Request, taskID, workspaceID string, req TaskFailRequest) {
+	// MUL-5305: SessionRolloutMissing is applied inside FailTask's terminal
+	// transaction — forcing session_id NULL (overriding the COALESCE that would
+	// keep a stale mid-flight pin) and flagging the row in the same commit that
+	// creates and wakes the auto-retry, so the retry can never claim the withheld
+	// pointer or miss the continuity gap.
+	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID)
 	if err != nil {
+		// A FailTask error is an infrastructure failure (the terminal
+		// transaction that also clears the withheld session, writes the
+		// continuity-gap flag, and creates the auto-retry rolled back), not a bad
+		// request. Return 5xx so the daemon's terminal callback — which treats a
+		// 400 as permanent and bails without retrying (postJSONWithRetry /
+		// isTransientError) — retries and the fail, gap flag, and retry land
+		// exactly once (MUL-5305). An invalid request body still returns 400 above.
 		slog.Warn("fail task failed", "task_id", taskID, "error", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.TaskService.NotifyTaskFinished(*task)
@@ -3781,8 +3961,52 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	// issue-facing surface must resolve initiator/originator names (departed-safe,
 	// one batch) — otherwise the badge falls back to "someone" on issue detail.
 	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
+	h.hydrateTaskUsage(r.Context(), issue.ID, resp)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// hydrateTaskUsage attaches each run's own token usage to the execution-log
+// rows. One query for the whole issue, then a map join — not one query per
+// task, which would be an N+1 over a list the UI always renders in full.
+//
+// Usage is display metadata: a failure here must not take the execution log
+// down with it, so the error is swallowed and every row keeps its nil Usage,
+// which the UI already renders as "no usage recorded".
+func (h *Handler) hydrateTaskUsage(ctx context.Context, issueID pgtype.UUID, resp []AgentTaskResponse) {
+	if len(resp) == 0 {
+		return
+	}
+
+	rows, err := h.Queries.ListIssueTaskUsage(ctx, issueID)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+
+	byTask := make(map[string][]TaskUsageData, len(resp))
+	for _, row := range rows {
+		var cost *int64
+		if row.CostUsdTicks.Valid {
+			v := row.CostUsdTicks.Int64
+			cost = &v
+		}
+		taskID := uuidToString(row.TaskID)
+		byTask[taskID] = append(byTask[taskID], TaskUsageData{
+			Provider:         row.Provider,
+			Model:            row.Model,
+			InputTokens:      row.InputTokens,
+			OutputTokens:     row.OutputTokens,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
+			CostUsdTicks:     cost,
+		})
+	}
+
+	for i := range resp {
+		if usage, ok := byTask[resp[i].ID]; ok {
+			resp[i].Usage = usage
+		}
+	}
 }
 
 // ListTaskMessagesByUser returns task messages for a task.

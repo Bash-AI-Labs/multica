@@ -77,3 +77,7 @@ data/
 # Sensitive exports — never commit
 multica-export/
 .gstack/
+
+# Python (agent tooling)
+__pycache__/
+*.pyc

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,9 +84,12 @@ func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecO
 	if opts.ThinkingLevel != "" {
 		args = append(args, "--variant", opts.ThinkingLevel)
 	}
-	if opts.SystemPrompt != "" {
-		args = append(args, "--prompt", opts.SystemPrompt)
-	}
+	// OpenCode's `run` subcommand has no --prompt flag — passing one makes the
+	// CLI exit 1 with a usage dump before sending anything (checked against
+	// OpenCode 1.17.7). SystemPrompt is therefore never forwarded; the runtime
+	// brief reaches the agent through the per-task AGENTS.md the daemon writes
+	// into the workdir, which OpenCode loads itself (MUL-5392). Same constraint
+	// as the DevEco backend, which was forked from this one.
 	if opts.MaxTurns > 0 {
 		b.cfg.Logger.Warn("opencode does not support --max-turns; ignoring", "maxTurns", opts.MaxTurns)
 	}
@@ -302,8 +304,7 @@ func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventRes
 	stepHasContinuationTool := false // current step has a local tool result OpenCode must feed back
 	awaitingContinuation := false    // the last step_finish still required another step
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newAgentStreamScanner(r)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

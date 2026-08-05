@@ -540,10 +540,28 @@ func TestLocalStorage_SignedURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
+	objectLink := store.ObjectURL(key)
+	streamLink, err := store.UploadStream(
+		context.Background(),
+		key,
+		strings.NewReader("streamed"),
+		int64(len("streamed")),
+		"image/png",
+		"abc.png",
+	)
+	if err != nil {
+		t.Fatalf("UploadStream failed: %v", err)
+	}
 
 	// URL must be absolute on the base host and carry a ?sig= signature.
 	if !strings.HasPrefix(link, "https://media.example.com:8443/uploads/"+key+"?sig=") {
 		t.Fatalf("signed link has unexpected shape: %q", link)
+	}
+	if objectLink != link {
+		t.Fatalf("ObjectURL() = %q, want signed upload URL %q", objectLink, link)
+	}
+	if streamLink != link {
+		t.Fatalf("UploadStream() = %q, want signed upload URL %q", streamLink, link)
 	}
 
 	u, err := url.Parse(link)

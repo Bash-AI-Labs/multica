@@ -6,12 +6,18 @@ import {
   FALLBACK_AUTOPILOT_RUN,
   CommentTriggerPreviewSchema,
   DashboardAgentRunTimeListSchema,
+  DashboardFailureByAgentListSchema,
+  DashboardFailureDailyListSchema,
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
   ChatDraftRestoresResponseSchema,
+  ChatPendingTaskSchema,
+  PrioritizeQueuedChatTaskResponseSchema,
   CreateFeedbackResponseSchema,
   DuplicateIssueErrorBodySchema,
   EMPTY_CHAT_DRAFT_RESTORES,
+  EMPTY_CHAT_PENDING_TASK,
+  EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   EMPTY_APP_CONFIG,
   EMPTY_INBOX_ITEMS,
@@ -23,11 +29,14 @@ import {
   IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
   ListPropertiesResponseSchema,
+  MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+  RuntimeModelListRequestSchema,
   SearchProjectsResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
+  SendChatMessageResponseSchema,
   SquadListSchema,
   SquadSchema,
   TimelineEntriesSchema,
@@ -407,6 +416,113 @@ describe("ChatDraftRestoresResponseSchema", () => {
   });
 });
 
+describe("ChatPendingTaskSchema", () => {
+  const ENDPOINT = { endpoint: "GET /api/chat/sessions/:id/pending-task" };
+
+  it("keeps legacy responses compatible when queued_tasks is absent", () => {
+    const parsed = parseWithFallback(
+      {
+        task_id: "task-active",
+        status: "running",
+        created_at: "2026-07-01T00:00:00Z",
+      },
+      ChatPendingTaskSchema,
+      EMPTY_CHAT_PENDING_TASK,
+      ENDPOINT,
+    );
+
+    expect(parsed).toMatchObject({
+      task_id: "task-active",
+      status: "running",
+    });
+    expect(parsed.queued_tasks).toBeUndefined();
+  });
+
+  it("parses queued task summaries", () => {
+    const parsed = ChatPendingTaskSchema.parse({
+      task_id: "task-active",
+      status: "running",
+      queued_tasks: [
+        {
+          task_id: "task-queued",
+          status: "queued",
+          content: "Follow up after the current task",
+          created_at: "2026-07-01T00:01:00Z",
+        },
+      ],
+    });
+
+    expect(parsed.queued_tasks).toEqual([
+      expect.objectContaining({
+        task_id: "task-queued",
+        content: "Follow up after the current task",
+      }),
+    ]);
+  });
+
+  it("keeps a valid head and ignores only malformed queued rows", () => {
+    const parsed = parseWithFallback(
+      {
+        task_id: "task-active",
+        queued_tasks: [{ task_id: 42, status: "queued" }],
+      },
+      ChatPendingTaskSchema,
+      EMPTY_CHAT_PENDING_TASK,
+      ENDPOINT,
+    );
+
+    expect(parsed).toEqual({
+      task_id: "task-active",
+      queued_tasks: [],
+    });
+  });
+});
+
+describe("SendChatMessageResponseSchema", () => {
+  const base = {
+    message_id: "message-1",
+    task_id: "task-1",
+    created_at: "2026-08-05T00:00:00Z",
+  };
+
+  it("parses the server-authoritative queue position", () => {
+    expect(SendChatMessageResponseSchema.parse({ ...base, queued: false }).queued).toBe(false);
+  });
+
+  it("ignores a malformed additive queue position without losing the accepted send", () => {
+    expect(SendChatMessageResponseSchema.parse({ ...base, queued: "no" }).queued).toBeUndefined();
+  });
+});
+
+describe("PrioritizeQueuedChatTaskResponseSchema", () => {
+  const ENDPOINT = {
+    endpoint: "POST /api/chat/sessions/:id/queued-tasks/:taskId/prioritize",
+  };
+
+  it("parses the prioritized task id", () => {
+    expect(
+      PrioritizeQueuedChatTaskResponseSchema.parse({
+        task_id: "task-queued",
+        active_task_id: "task-active",
+      }),
+    ).toEqual({
+      task_id: "task-queued",
+      active_task_id: "task-active",
+    });
+  });
+
+  it("falls back when task_id is malformed", () => {
+    expect(
+      parseWithFallback(
+        { task_id: 42 },
+        PrioritizeQueuedChatTaskResponseSchema,
+        EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE);
+  });
+});
+
 describe("CreateFeedbackResponseSchema", () => {
   const ENDPOINT = { endpoint: "POST /api/feedback" };
 
@@ -639,7 +755,46 @@ describe("dashboard + runtime usage schema drift", () => {
 
   it("rejects a non-array body so parseWithFallback can return its fallback", () => {
     expect(DashboardUsageDailyListSchema.safeParse(null).success).toBe(false);
+    expect(DashboardFailureDailyListSchema.safeParse(null).success).toBe(false);
+    expect(DashboardFailureByAgentListSchema.safeParse({ rows: [] }).success).toBe(
+      false,
+    );
     expect(RuntimeUsageListSchema.safeParse({ rows: [] }).success).toBe(false);
+  });
+
+  it("keeps a failure_reason the client build has never heard of", () => {
+    // failure_reason is an open string, not an enum: the backend taxonomy
+    // grows, and an installed desktop client must still count a reason its
+    // build predates rather than dropping the row (and with it the day's
+    // error total).
+    const parsed = DashboardFailureDailyListSchema.parse([
+      { date: "2026-05-19", failure_reason: "agent_error.brand_new", task_count: 3 },
+    ]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.failure_reason).toBe("agent_error.brand_new");
+    expect(parsed[0]?.task_count).toBe(3);
+  });
+
+  it("coerces a missing failure row field without dropping the array", () => {
+    const daily = DashboardFailureDailyListSchema.parse([{ date: "2026-05-19" }]);
+    expect(daily).toHaveLength(1);
+    // "" is the succeeded bucket, so a reason-less row lands in the
+    // denominator instead of inventing a failure that never happened.
+    //
+    // Defaulting to a failure bucket instead was considered and rejected: the
+    // realistic drift here is someone adding `omitempty` to the Go struct
+    // tag, which would strip the field from exactly the SUCCESS rows and turn
+    // every window into a 100% error rate. Deflating a rate under drift is
+    // the milder failure. TestDashboardFailureWireContractKeepsEmptyReason
+    // (server/internal/handler/dashboard_test.go) guards the other side by
+    // pinning that the server always emits the field.
+    expect(daily[0]?.failure_reason).toBe("");
+    expect(daily[0]?.task_count).toBe(0);
+
+    const byAgent = DashboardFailureByAgentListSchema.parse([
+      { failure_reason: "timeout", task_count: 2 },
+    ]);
+    expect(byAgent[0]?.agent_id).toBe("");
   });
 
   it("keeps unknown server-side fields via .loose()", () => {
@@ -959,5 +1114,121 @@ describe("CommentTriggerPreviewSchema.blocked", () => {
       ],
     });
     expect(parsed.blocked.map((b) => b.target_id)).toEqual(["s1", "a1"]);
+  });
+});
+
+describe("RuntimeModelListRequestSchema", () => {
+  const completed = {
+    id: "req-1",
+    runtime_id: "rt-1",
+    status: "completed",
+    supported: true,
+    created_at: "2026-07-29T00:00:00Z",
+    updated_at: "2026-07-29T00:00:01Z",
+    models: [
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6-Sol",
+        provider: "openai",
+        default: true,
+        thinking: {
+          supported_levels: [{ value: "high", label: "High" }],
+          default_level: "low",
+        },
+        service_tiers: [{ id: "fast", name: "Fast" }],
+      },
+    ],
+  };
+
+  it("parses a live completed discovery, keeping the fields the UI branches on", () => {
+    const parsed = parseWithFallback(
+      completed,
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.status).toBe("completed");
+    expect(parsed.supported).toBe(true);
+    expect(parsed.models?.[0]?.default).toBe(true);
+    expect(parsed.models?.[0]?.thinking?.supported_levels).toEqual([
+      { value: "high", label: "High" },
+    ]);
+    expect(parsed.models?.[0]?.service_tiers).toEqual([{ id: "fast", name: "Fast" }]);
+    expect(parsed.cached).toBeUndefined();
+  });
+
+  it("keeps the additive cache markers when the server serves a snapshot", () => {
+    const parsed = parseWithFallback(
+      { ...completed, cached: true, cached_at: "2026-07-29T00:00:00Z" },
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.cached).toBe(true);
+    expect(parsed.cached_at).toBe("2026-07-29T00:00:00Z");
+  });
+
+  // A backend that predates MUL-5444 sends neither marker; an even older one
+  // may omit `supported`. Both must stay usable rather than reading as
+  // "runtime manages the model itself" off an undefined.
+  it("defaults supported to true on an older backend that omits it", () => {
+    const { supported: _omitted, ...withoutSupported } = completed;
+    const parsed = parseWithFallback(
+      withoutSupported,
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.supported).toBe(true);
+    expect(parsed.cached).toBeUndefined();
+  });
+
+  it("passes an unknown status through instead of failing the whole response", () => {
+    const parsed = parseWithFallback(
+      { ...completed, status: "superseded" },
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.status).toBe("superseded");
+  });
+
+  // Malformed bodies must land on the "failed" fallback: `completed` would
+  // fabricate an empty catalog and `pending` would spin the picker until the
+  // client-side poll timeout.
+  it("falls back to an explicit failure on a malformed body", () => {
+    for (const malformed of [
+      null,
+      "nope",
+      42,
+      {},
+      { status: 7 },
+      { ...completed, status: undefined },
+      { ...completed, supported: "yes" },
+      { ...completed, models: "nope" },
+      { ...completed, models: [{ label: "no id" }] },
+    ]) {
+      const parsed = parseWithFallback(
+        malformed,
+        RuntimeModelListRequestSchema,
+        MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+        { endpoint: "test" },
+      );
+      expect(parsed.status).toBe("failed");
+      expect(parsed.supported).toBe(true);
+      expect(parsed.error).toBe("invalid model discovery response");
+    }
+  });
+
+  it("keeps unknown server fields instead of stripping them", () => {
+    const parsed = parseWithFallback(
+      { ...completed, future_field: "keep me" },
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect((parsed as unknown as { future_field?: string }).future_field).toBe(
+      "keep me",
+    );
   });
 });
