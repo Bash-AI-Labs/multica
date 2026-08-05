@@ -286,14 +286,15 @@ func healthPortForProfile(profile string) int {
 // the test binary itself, which ignores the daemon args and re-runs the suite.
 var daemonExecutable = selfexec.Resolve
 
-// requireDaemonAuth fails fast when the user never ran `multica login`. The
-// daemon child performs the same check (resolveAuth) and dies immediately,
-// but the background parent can't see that exit — it would poll the health
-// port for the full 45s readiness window and then print a vague "check logs"
-// warning. Checking before spawning turns that silent stall into an
-// immediate, actionable error. Mirrors daemon.resolveAuth: the daemon only
-// authenticates via the stored config token, never MULTICA_TOKEN.
+// requireDaemonAuth fails fast when the daemon has neither a stored login nor
+// local-mode auto-authentication. The child performs the same check
+// (resolveAuth) and dies immediately, but the background parent can't see that
+// exit — it would poll the health port for the full readiness window and then
+// print a vague "check logs" warning.
 func requireDaemonAuth(profile string) error {
+	if daemonLocalModeEnabled() {
+		return nil
+	}
 	cfg, err := cli.LoadCLIConfigForProfile(profile)
 	if err != nil {
 		return fmt.Errorf("load CLI config: %w", err)
@@ -306,6 +307,11 @@ func requireDaemonAuth(profile string) error {
 		return fmt.Errorf("you are not logged in. Run '%s' first, then start the daemon", loginHint)
 	}
 	return nil
+}
+
+func daemonLocalModeEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("MULTICA_LOCAL_MODE")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
@@ -960,6 +966,18 @@ func requireDaemonRestartPreflight(cmd *cobra.Command, profile string) error {
 
 	ctx, cancel := cli.APIContext(context.Background())
 	defer cancel()
+	if daemonLocalModeEnabled() {
+		var loginResp struct {
+			Token string `json:"token"`
+		}
+		if err := cli.NewAPIClient(baseURL, "", "").PostJSON(ctx, "/auth/local-login", map[string]any{}, &loginResp); err != nil {
+			return fmt.Errorf("refusing to restart: local-mode authentication against %s failed (%w); the running daemon was left untouched", baseURL, err)
+		}
+		if strings.TrimSpace(loginResp.Token) == "" {
+			return fmt.Errorf("refusing to restart: local-mode authentication against %s returned an empty token; the running daemon was left untouched", baseURL)
+		}
+		return nil
+	}
 	if err := cli.NewAPIClient(baseURL, "", cfg.Token).GetJSON(ctx, "/api/me", nil); err != nil {
 		var httpErr *cli.HTTPError
 		if errors.As(err, &httpErr) {

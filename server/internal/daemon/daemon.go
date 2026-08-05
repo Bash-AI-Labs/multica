@@ -1746,19 +1746,9 @@ func (d *Daemon) resolveAuth() error {
 		return nil
 	}
 
-	// 2. Token from CLI config file
-	cfg, err := cli.LoadCLIConfigForProfile(d.cfg.Profile)
-	if err != nil {
-		return fmt.Errorf("load CLI config: %w", err)
-	}
-	if cfg.Token != "" {
-		d.client.SetToken(cfg.Token)
-		d.logger.Info("authenticated")
-		d.logger.Debug("auth token loaded", "profile", d.cfg.Profile, "token_len", len(cfg.Token))
-		return nil
-	}
-
-	// 3. Local mode: auto-login via /auth/local-login
+	// 2. Local mode: always mint a fresh token. A previously persisted JWT may
+	// have expired or been revoked; letting it win would prevent local-login
+	// from running and leave this self-hosted runtime offline.
 	if localModeEnabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1768,6 +1758,18 @@ func (d *Daemon) resolveAuth() error {
 		}
 		d.client.SetToken(token)
 		d.logger.Info("authenticated via /auth/local-login")
+		return nil
+	}
+
+	// 3. Token from CLI config file
+	cfg, err := cli.LoadCLIConfigForProfile(d.cfg.Profile)
+	if err != nil {
+		return fmt.Errorf("load CLI config: %w", err)
+	}
+	if cfg.Token != "" {
+		d.client.SetToken(cfg.Token)
+		d.logger.Info("authenticated")
+		d.logger.Debug("auth token loaded", "profile", d.cfg.Profile, "token_len", len(cfg.Token))
 		return nil
 	}
 

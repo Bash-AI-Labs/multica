@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -207,6 +208,41 @@ func TestRequireDaemonAuth(t *testing.T) {
 			t.Fatalf("requireDaemonAuth() = %v, want nil", err)
 		}
 	})
+
+	t.Run("local mode does not require stored token", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MULTICA_LOCAL_MODE", "true")
+		if err := requireDaemonAuth("local"); err != nil {
+			t.Fatalf("requireDaemonAuth(local mode) = %v, want nil", err)
+		}
+	})
+}
+
+func TestRequireDaemonRestartPreflightLocalMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MULTICA_LOCAL_MODE", "true")
+	t.Setenv("MULTICA_SERVER_URL", "")
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/auth/local-login" {
+			t.Errorf("request = %s %s, want POST /auth/local-login", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"token": "local-token"}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer api.Close()
+
+	const profile = "restart-local-mode"
+	if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: api.URL}, profile); err != nil {
+		t.Fatalf("SaveCLIConfigForProfile: %v", err)
+	}
+	if err := requireDaemonRestartPreflight(newRestartTestCmd(t, profile), profile); err != nil {
+		t.Fatalf("requireDaemonRestartPreflight(local mode) = %v, want nil", err)
+	}
 }
 
 // TestDaemonStartBackgroundUnauthenticatedFailsFast exercises the real
