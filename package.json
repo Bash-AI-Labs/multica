@@ -41,7 +41,6 @@
       "@hono/node-server@1.19.11": "1.19.15",
       "@opentelemetry/core@2.2.0": "2.8.0",
       "@opentelemetry/core@2.7.0": "2.8.0",
-      "@protobufjs/utf8@1.1.0": "1.1.1",
       "body-parser@2.2.2": "2.3.0",
       "brace-expansion@1.1.13": "1.1.18",
       "brace-expansion@2.0.3": "2.1.4",
