@@ -20,6 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@expo/metro-runtime": "~55.0.12",
     "@expo/vector-icons": "^14.1.0",
     "@multica/core": "workspace:*",
     "@react-native-community/datetimepicker": "8.6.0",
@@ -53,7 +54,7 @@
     "expo-image": "^55.0.10",
     "expo-image-picker": "~55.0.20",
     "expo-linking": "~55.0.0",
-    "expo-router": "~55.0.14",
+    "expo-router": "~55.0.17",
     "expo-secure-store": "~55.0.13",
     "expo-status-bar": "~55.0.0",
     "expo-system-ui": "~55.0.0",
@@ -84,8 +85,8 @@
   "devDependencies": {
     "@babel/core": "^7.29.6",
     "@types/react": "~19.0.0",
-    "cross-env": "^7.0.3",
-    "dotenv-cli": "^7.4.4",
+    "cross-env": "^10.1.0",
+    "dotenv-cli": "^11.0.0",
     "eslint-config-expo": "~55.0.0",
     "typescript": "~5.9.0",
     "vitest": "catalog:"

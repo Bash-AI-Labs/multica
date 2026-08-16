@@ -3,6 +3,7 @@ import { DocsPage, DocsBody } from "fumadocs-ui/page";
 import { notFound } from "next/navigation";
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import { ImageZoom } from "fumadocs-ui/components/image-zoom";
+import type { ComponentProps } from "react";
 import type { Metadata } from "next";
 import { DocsHero } from "@/components/hero";
 import { NumberedCards, NumberedCard, NumberedSteps, Step } from "@/components/editorial";
@@ -60,7 +61,12 @@ export default async function Page({
             components={{
               ...defaultMdxComponents,
               // Same lightbox mapping as [...slug]/page.tsx — keep in sync.
-              img: (props) => <ImageZoom {...props} />,
+              img: ({ src, ...props }: ComponentProps<"img">) =>
+                src instanceof Blob ? (
+                  <img src={src} {...props} />
+                ) : (
+                  <ImageZoom src={src} {...props} />
+                ),
               a: LocaleLink,
               NumberedCards,
               NumberedCard,
