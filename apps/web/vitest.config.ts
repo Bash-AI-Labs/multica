@@ -1,9 +1,10 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import mdx from "fumadocs-mdx/vite";
 import path from "path";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [...mdx(), react()],
   test: {
     environment: "jsdom",
     globals: true,
