@@ -45,6 +45,7 @@ import type {
 } from "@multica/core/types";
 import type { ChatTimelineItem } from "@multica/core/chat";
 import { buildTimeline } from "../../common/task-transcript";
+import { OnboardingStarterCards } from "./onboarding-starter-cards";
 import { TaskStatusPill } from "./task-status-pill";
 import { CHAT_COLUMN, CHAT_GUTTER } from "./chat-column";
 import { formatElapsedMs } from "../lib/format";
@@ -150,15 +151,15 @@ function ChatListHeader({ context }: { context?: ChatListContext }) {
 // constant bottom inset: without it the last row's own py-2 was the only gap
 // between the final reply (and its follow-up pills) and the composer.
 function ChatListFooter({ context }: { context?: ChatListContext }) {
-  if (!context) return null;
-  if (!context.showStatusPill || !context.pendingTask) return null;
   return (
     <div className={cn(CHAT_COLUMN, "pb-4 space-y-4")}>
-      <TaskStatusPill
-        pendingTask={context.pendingTask}
-        taskMessages={context.liveTaskMessages ?? []}
-        availability={context.availability}
-      />
+      {context?.showStatusPill && context.pendingTask ? (
+        <TaskStatusPill
+          pendingTask={context.pendingTask}
+          taskMessages={context.liveTaskMessages ?? []}
+          availability={context.availability}
+        />
+      ) : null}
     </div>
   );
 }
@@ -206,6 +207,18 @@ export function ChatMessageList({
     return null;
   }, [messages]);
 
+  // Mika's onboarding opening self-describes (message_kind stamped by the
+  // completion path — the hidden kickoff row never reaches clients) and
+  // carries the product's starter cards instead of that turn's quick-action
+  // chips (MUL-5765).
+  const starterCardsMessageId = useMemo(
+    () =>
+      messages.find(
+        (m) => m.role === "assistant" && m.message_kind === "onboarding_opening",
+      )?.id ?? null,
+    [messages],
+  );
+
   // Once the assistant message for this pending task has landed in the
   // messages list, AssistantMessage owns its rendering — suppress the live
   // timeline (and pill) to avoid rendering the same content in two places
@@ -230,14 +243,18 @@ export function ChatMessageList({
   // Persisted messages plus, while a task is in flight, one synthetic trailing
   // row for it. When the assistant message persists, `hasLive` goes false and
   // the message takes the SAME key at the SAME position — an in-place data
-  // swap, not a remount.
+  // swap, not a remount. The onboarding kickoff is a server-authored carrier
+  // for Mika's first task, not something the member typed, so it never becomes
+  // a visible bubble.
   const renderItems: ChatRenderItem[] = useMemo(() => {
-    const items: ChatRenderItem[] = messages.map((message) => ({
-      key: messageRowKey(message),
-      kind: "message" as const,
-      message,
-      taskId: message.task_id ?? null,
-    }));
+    const items: ChatRenderItem[] = messages
+      .filter((message) => message.message_kind !== "onboarding_kickoff")
+      .map((message) => ({
+        key: messageRowKey(message),
+        kind: "message" as const,
+        message,
+        taskId: message.task_id ?? null,
+      }));
     if (hasLive && pendingTaskId) {
       items.push({ key: `task:${pendingTaskId}`, kind: "live", taskId: pendingTaskId });
     }
@@ -333,6 +350,7 @@ export function ChatMessageList({
               onRegenerateQuickActions={onRegenerateQuickActions}
               latestAssistantMessageId={latestAssistantMessageId}
               quickActionsPendingMessageId={quickActionsPendingMessageId}
+              starterCardsMessageId={starterCardsMessageId}
             />
           </div>
         )}
@@ -397,6 +415,7 @@ const MessageBubble = memo(function MessageBubble({
   onRegenerateQuickActions,
   latestAssistantMessageId,
   quickActionsPendingMessageId,
+  starterCardsMessageId,
 }: {
   item: ChatRenderItem;
   isPending: boolean;
@@ -406,6 +425,7 @@ const MessageBubble = memo(function MessageBubble({
   onRegenerateQuickActions?: (message: ChatMessage) => void | Promise<unknown>;
   latestAssistantMessageId: string | null;
   quickActionsPendingMessageId: string | null;
+  starterCardsMessageId: string | null;
 }) {
   // The live row and the persisted assistant row both land here under one key,
   // and both render <AssistantMessage> — same component type, same position —
@@ -460,6 +480,7 @@ const MessageBubble = memo(function MessageBubble({
       onRegenerateQuickActions={onRegenerateQuickActions}
       canRegenerateQuickActions={message.id === latestAssistantMessageId}
       quickActionsPending={quickActionsPendingMessageId === message.id}
+      showStarterCards={message.id === starterCardsMessageId}
     />
   );
 });
@@ -491,6 +512,7 @@ function AssistantMessage({
   onRegenerateQuickActions,
   canRegenerateQuickActions = false,
   quickActionsPending = false,
+  showStarterCards = false,
 }: {
   taskId: string | null;
   message?: ChatMessage;
@@ -501,6 +523,8 @@ function AssistantMessage({
   onRegenerateQuickActions?: (message: ChatMessage) => void | Promise<unknown>;
   canRegenerateQuickActions?: boolean;
   quickActionsPending?: boolean;
+  /** This turn is Mika's onboarding opening — render starter cards, not chips. */
+  showStarterCards?: boolean;
 }) {
   const canFetchTaskMessages = isTaskMessageTaskId(taskId);
 
@@ -576,7 +600,14 @@ function AssistantMessage({
             timeline={timeline}
             isPending={isPending}
           />
-          {onQuickAction && (message.quick_actions?.length ?? 0) > 0 ? (
+          {onQuickAction && showStarterCards ? (
+            // The opening's starter cards own this turn's suggestion strip
+            // (MUL-5765); the server skips chip generation for it.
+            <OnboardingStarterCards
+              onPick={onQuickAction}
+              disabled={quickActionsDisabled || isPending}
+            />
+          ) : onQuickAction && (message.quick_actions?.length ?? 0) > 0 ? (
             <QuickActions
               actions={message.quick_actions ?? []}
               disabled={quickActionsDisabled || isPending}
@@ -916,6 +947,7 @@ function FailureBubble({
     manual: t(($) => $.message_list.failure.manual),
     cancelled: t(($) => $.message_list.failure.manual),
     skill_bundle_unavailable: t(($) => $.message_list.failure.skill_bundle_unavailable),
+    runtime_cli_timeout: t(($) => $.message_list.failure.runtime_cli_timeout),
     "agent_error.provider_network": t(($) => $.message_list.failure.provider_network),
     "agent_error.provider_auth_or_access": t(($) => $.message_list.failure.provider_auth_or_access),
     "agent_error.provider_quota_limit": t(($) => $.message_list.failure.provider_quota_limit),

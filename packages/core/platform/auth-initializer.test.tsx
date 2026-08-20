@@ -1,18 +1,31 @@
 /**
  * @vitest-environment jsdom
  */
+import { act, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setApiInstance } from "../api";
-import type { ApiClient } from "../api/client";
-import { createAuthStore, registerAuthStore, useAuthStore } from "../auth";
-import { configStore } from "../config";
-import type { User } from "../types";
-import type { StorageAdapter } from "../types/storage";
+import { ApiError, type ApiClient } from "../api/client";
+import {
+  createAuthStore,
+  registerAuthStore,
+  useAuthStore,
+} from "../auth";
+import type { StorageAdapter, User, Workspace } from "../types";
 import { workspaceKeys } from "../workspace/queries";
 import { AuthInitializer } from "./auth-initializer";
+
+const logger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("../logger", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../logger")>();
+  return { ...actual, createLogger: () => logger };
+});
 
 vi.mock("../analytics", () => ({
   captureSignupSource: vi.fn(),
@@ -21,108 +34,327 @@ vi.mock("../analytics", () => ({
   resetAnalytics: vi.fn(),
 }));
 
-const user: User = {
+const fakeUser = {
   id: "user-1",
-  name: "Local User",
-  email: "local@example.com",
+  name: "Alice",
+  email: "alice@example.com",
   avatar_url: null,
-  onboarded_at: null,
-  onboarding_questionnaire: {},
-  starter_content_state: null,
-  language: null,
-  profile_description: "",
-  timezone: null,
-  created_at: "2026-01-01T00:00:00Z",
-  updated_at: "2026-01-01T00:00:00Z",
-};
+} as User;
 
-function createStorage(): StorageAdapter & { values: Map<string, string> } {
-  const values = new Map<string, string>();
+const fakeWorkspaces = [{ id: "ws-1", slug: "acme" }] as Workspace[];
+
+function makeStorage(initial: Record<string, string> = {}): StorageAdapter & {
+  snapshot: () => Record<string, string>;
+} {
+  const values = { ...initial };
   return {
-    values,
-    getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-    removeItem: (key) => values.delete(key),
+    getItem: (key) => values[key] ?? null,
+    setItem: (key, value) => {
+      values[key] = value;
+    },
+    removeItem: (key) => {
+      delete values[key];
+    },
+    snapshot: () => ({ ...values }),
   };
 }
 
-function wrapper(queryClient: QueryClient, children: ReactNode) {
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
+  return {
+    getConfig: vi.fn().mockResolvedValue({}),
+    getMe: vi.fn().mockResolvedValue(fakeUser),
+    listWorkspaces: vi.fn().mockResolvedValue(fakeWorkspaces),
+    setToken: vi.fn(),
+    ...overrides,
+  } as unknown as ApiClient;
 }
 
-describe("AuthInitializer local mode", () => {
-  let queryClient: QueryClient;
-  let storage: ReturnType<typeof createStorage>;
-
-  beforeEach(() => {
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    storage = createStorage();
-    configStore.setState({ localModeEnabled: false });
+function renderInitializer({
+  api,
+  storage = makeStorage({ multica_token: "token-1" }),
+  cookieAuth = false,
+  platform = "desktop",
+}: {
+  api: ApiClient;
+  storage?: StorageAdapter;
+  cookieAuth?: boolean;
+  platform?: "desktop" | "web";
+}) {
+  const onLogin = vi.fn();
+  const onLogout = vi.fn();
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
   });
+  setApiInstance(api);
+  registerAuthStore(
+    createAuthStore({ api, storage, cookieAuth, onLogin, onLogout }),
+  );
 
-  afterEach(() => {
-    queryClient.clear();
-    vi.restoreAllMocks();
-  });
+  const result = render(
+    <QueryClientProvider client={queryClient}>
+      <AuthInitializer
+        cookieAuth={cookieAuth}
+        identity={{ platform }}
+        onLogin={onLogin}
+        onLogout={onLogout}
+        storage={storage}
+      >
+        <div>child</div>
+      </AuthInitializer>
+    </QueryClientProvider>,
+  );
 
-  it("uses the server config to auto-login in token mode and seeds workspaces", async () => {
-    const workspaces = [{ id: "ws-1", name: "Local", slug: "local" }];
-    const api = {
-      getConfig: vi.fn().mockResolvedValue({
-        cdn_domain: "",
-        allow_signup: true,
-        local_mode_enabled: true,
-      }),
-      localLogin: vi.fn().mockResolvedValue({ token: "local-token", user }),
-      listWorkspaces: vi.fn().mockResolvedValue(workspaces),
-      setToken: vi.fn(),
-    } as unknown as ApiClient;
-    setApiInstance(api);
-    registerAuthStore(createAuthStore({ api, storage }));
+  return { ...result, onLogin, onLogout, queryClient };
+}
 
-    render(
-      wrapper(
-        queryClient,
-        <AuthInitializer storage={storage}>
-          <div>ready</div>
-        </AuthInitializer>,
-      ),
-    );
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
-    await waitFor(() => expect(api.localLogin).toHaveBeenCalledOnce());
-    expect(storage.values.get("multica_token")).toBe("local-token");
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("AuthInitializer recovery", () => {
+  it("uses server config to auto-login in local token mode", async () => {
+    const storage = makeStorage();
+    const localLogin = vi.fn().mockResolvedValue({
+      token: "local-token",
+      user: fakeUser,
+    });
+    const api = makeApi({
+      getConfig: vi.fn().mockResolvedValue({ local_mode_enabled: true }),
+      getMe: vi.fn(),
+      localLogin,
+    });
+    const { queryClient } = renderInitializer({ api, storage });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+      expect(queryClient.getQueryData(workspaceKeys.list())).toEqual(
+        fakeWorkspaces,
+      );
+    });
+    expect(localLogin).toHaveBeenCalledOnce();
+    expect(api.getMe).not.toHaveBeenCalled();
+    expect(storage.snapshot().multica_token).toBe("local-token");
     expect(api.setToken).toHaveBeenCalledWith("local-token");
-    expect(useAuthStore.getState().user).toEqual(user);
-    expect(queryClient.getQueryData(workspaceKeys.list())).toEqual(workspaces);
+  });
+
+  it("falls back to local login when cookie auth returns 401", async () => {
+    const localLogin = vi.fn().mockResolvedValue({
+      token: "local-token",
+      user: fakeUser,
+    });
+    const api = makeApi({
+      getConfig: vi.fn().mockResolvedValue({ local_mode_enabled: true }),
+      getMe: vi
+        .fn()
+        .mockRejectedValue(new ApiError("unauthorized", 401, "Unauthorized")),
+      localLogin,
+    });
+    const { onLogout } = renderInitializer({
+      api,
+      cookieAuth: true,
+      platform: "web",
+    });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+    });
+    expect(localLogin).toHaveBeenCalledOnce();
+    expect(onLogout).not.toHaveBeenCalled();
   });
 
   it.each([
     ["omitted", {}],
-    ["false", { local_mode_enabled: false }],
-  ])("does not auto-login when local mode is %s", async (_label, config) => {
-    const api = {
-      getConfig: vi.fn().mockResolvedValue({
-        cdn_domain: "",
-        allow_signup: true,
-        ...config,
-      }),
-      localLogin: vi.fn(),
-      setToken: vi.fn(),
-    } as unknown as ApiClient;
-    setApiInstance(api);
-    registerAuthStore(createAuthStore({ api, storage }));
+    ["disabled", { local_mode_enabled: false }],
+  ])("stays logged out without a token when local mode is %s", async (_label, config) => {
+    const storage = makeStorage();
+    const localLogin = vi.fn();
+    const api = makeApi({
+      getConfig: vi.fn().mockResolvedValue(config),
+      getMe: vi.fn(),
+      localLogin,
+    });
+    const { onLogout } = renderInitializer({ api, storage });
 
-    render(
-      wrapper(
-        queryClient,
-        <AuthInitializer storage={storage}>
-          <div>ready</div>
-        </AuthInitializer>,
-      ),
-    );
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("unauthenticated");
+    });
+    expect(localLogin).not.toHaveBeenCalled();
+    expect(api.getMe).not.toHaveBeenCalled();
+    expect(onLogout).toHaveBeenCalledOnce();
+  });
 
-    await waitFor(() => expect(useAuthStore.getState().isLoading).toBe(false));
-    expect(api.localLogin).not.toHaveBeenCalled();
-    expect(storage.values.has("multica_token")).toBe(false);
+  it("keeps the token and recovers on the online event after a network failure", async () => {
+    const storage = makeStorage({ multica_token: "token-1" });
+    const getMe = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValue(fakeUser);
+    const api = makeApi({ getMe });
+    const { onLogout } = renderInitializer({ api, storage });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("recovering");
+    });
+    expect(storage.snapshot().multica_token).toBe("token-1");
+    expect(onLogout).not.toHaveBeenCalled();
+
+    act(() => window.dispatchEvent(new Event("online")));
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().user).toEqual(fakeUser);
+    });
+    expect(getMe).toHaveBeenCalledTimes(2);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("lets a manual retry restart a recoverable auth attempt", async () => {
+    const getMe = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError("unavailable", 503, "Unavailable"))
+      .mockResolvedValue(fakeUser);
+    const api = makeApi({ getMe });
+    const { onLogout } = renderInitializer({ api });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("recovering");
+    });
+    act(() => useAuthStore.getState().retryAuthentication());
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+    });
+    expect(getMe).toHaveBeenCalledTimes(2);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("continues automatic retries at the capped backoff interval", async () => {
+    vi.useFakeTimers();
+    const getMe = vi.fn().mockRejectedValue(new TypeError("still offline"));
+    const api = makeApi({ getMe });
+    const { onLogout } = renderInitializer({ api });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(useAuthStore.getState().status).toBe("recovering");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(31_000);
+    });
+    expect(getMe).toHaveBeenCalledTimes(6);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(getMe).toHaveBeenCalledTimes(7);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate a verified desktop session when workspace loading fails", async () => {
+    const listWorkspaces = vi
+      .fn()
+      .mockRejectedValue(new TypeError("network unavailable"));
+    const api = makeApi({ listWorkspaces });
+    const { onLogout, queryClient } = renderInitializer({ api });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+      expect(
+        queryClient.getQueryState(workspaceKeys.list())?.status,
+      ).toBe("error");
+    });
+    expect(useAuthStore.getState().user).toEqual(fakeUser);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("publishes web auth independently when workspace loading fails", async () => {
+    const listWorkspaces = vi
+      .fn()
+      .mockRejectedValue(new TypeError("backend restarting"));
+    const api = makeApi({ listWorkspaces });
+    const { onLogout, queryClient } = renderInitializer({
+      api,
+      cookieAuth: true,
+      platform: "web",
+    });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+      expect(queryClient.getQueryState(workspaceKeys.list())?.status).toBe(
+        "error",
+      );
+    });
+    expect(useAuthStore.getState().user).toEqual(fakeUser);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("reloads app config after auth recovers from a transient failure", async () => {
+    const getConfig = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockResolvedValue({ feature_flags: { recovered: true } });
+    const getMe = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockResolvedValue(fakeUser);
+    const api = makeApi({ getConfig, getMe });
+    renderInitializer({ api });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("recovering");
+    });
+    act(() => useAuthStore.getState().retryAuthentication());
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("authenticated");
+      expect(getConfig).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("keeps retrying app config until it loads", async () => {
+    vi.useFakeTimers();
+    const getConfig = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockRejectedValueOnce(new TypeError("still unavailable"))
+      .mockResolvedValue({ feature_flags: { recovered: true } });
+    const api = makeApi({ getConfig });
+    renderInitializer({ api });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getConfig).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(getConfig).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(getConfig).toHaveBeenCalledTimes(3);
+  });
+
+  it("publishes a definitive logout for a genuine 401", async () => {
+    const storage = makeStorage({ multica_token: "token-1" });
+    const getMe = vi.fn().mockImplementation(() => {
+      storage.removeItem("multica_token");
+      return Promise.reject(new ApiError("unauthorized", 401, "Unauthorized"));
+    });
+    const api = makeApi({ getMe });
+    const { onLogout } = renderInitializer({ api, storage });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().status).toBe("unauthenticated");
+    });
+    expect(storage.snapshot().multica_token).toBeUndefined();
+    expect(onLogout).toHaveBeenCalledOnce();
   });
 });

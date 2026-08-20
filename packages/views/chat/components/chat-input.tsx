@@ -27,6 +27,7 @@ import { formatShortcut, useShortcut } from "@multica/core/shortcuts";
 import type { MentionItem } from "../../editor/extensions/mention-suggestion";
 import type { Attachment, Project } from "@multica/core/types";
 import { ProjectPicker } from "../../projects/components/project-picker";
+import { ClearablePillButton } from "../../common/pill-button";
 import { useT } from "../../i18n";
 
 const logger = createLogger("chat.ui");
@@ -98,6 +99,13 @@ interface ChatInputProps {
    *  as opposed to the session itself being archived — swaps the placeholder
    *  copy so the read-only reason reads accurately. */
   agentArchived?: boolean;
+  /** True when `disabled` is because the caller may no longer INVOKE the bound
+   *  agent (flipped to personal, ownership moved, dropped from the allow-list).
+   *  Distinct from `noAgent`: an agent IS bound and its transcript is readable,
+   *  the caller just cannot run it (MUL-6380). Takes precedence over `noAgent`
+   *  in the placeholder — when the only agent in the workspace is the revoked
+   *  one, both are true and "create an agent" would be the wrong instruction. */
+  agentAccessRevoked?: boolean;
   agentRuntimeRequired?: boolean;
   /** Name of the currently selected agent, used in the placeholder. */
   agentName?: string;
@@ -140,6 +148,7 @@ export function ChatInput({
   disabled,
   noAgent,
   agentArchived,
+  agentAccessRevoked,
   agentRuntimeRequired,
   agentName,
   leftAdornment,
@@ -531,7 +540,9 @@ export function ChatInput({
     },
   });
 
-  const placeholder = noAgent
+  const placeholder = agentAccessRevoked
+    ? t(($) => $.input.placeholder_access_revoked)
+    : noAgent
     ? t(($) => $.input.placeholder_no_agent)
     : disabled
       ? agentArchived
@@ -614,12 +625,13 @@ export function ChatInput({
                 onUpdate={(updates) => onProjectChange?.(updates.project_id ?? null)}
                 disabled={!projectSelectionEnabled}
                 triggerRender={
-                  <button
-                    type="button"
+                  <ClearablePillButton
                     disabled={!projectSelectionEnabled}
                     aria-label={t(($) => $.input.change_project_context)}
                     title={t(($) => $.input.change_project_context)}
-                    className="flex h-6 max-w-56 items-center gap-1.5 rounded-full border border-surface-border bg-surface-raised px-2 text-caption font-medium text-foreground transition-colors hover:bg-accent/60"
+                    onClear={() => onProjectChange?.(null)}
+                    clearLabel={t(($) => $.input.remove_project_context)}
+                    className="h-6 border-surface-border bg-surface-raised font-medium text-foreground"
                   />
                 }
               />

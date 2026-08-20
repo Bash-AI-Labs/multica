@@ -5,7 +5,6 @@ import {
   useInfiniteQuery,
   useQuery,
   useQueryClient,
-  type InfiniteData,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -34,6 +33,7 @@ import {
   useSetChatSessionArchived,
 } from "@multica/core/chat/mutations";
 import { useChatStore } from "@multica/core/chat";
+import { upsertChatMessageToCaches } from "@multica/core/chat/message-cache";
 import {
   enqueuePendingChatTask,
   hideQueuedChatMessages,
@@ -46,7 +46,6 @@ import type {
   Agent,
   Attachment,
   ChatMessage,
-  ChatMessagesPage,
   ChatPendingTask,
 } from "@multica/core/types";
 import { useT } from "../../i18n";
@@ -188,37 +187,6 @@ export function seedAcceptedPendingTask(
 
 const CHAT_VIRTUOSO_INITIAL_FIRST_ITEM_INDEX = 1_000_000;
 
-function appendChatMessageToLatestPageCache(
-  qc: ReturnType<typeof useQueryClient>,
-  sessionId: string,
-  message: ChatMessage,
-) {
-  qc.setQueryData<InfiniteData<ChatMessagesPage>>(
-    chatKeys.messagesPage(sessionId),
-    (old) => {
-      if (!old) {
-        return {
-          pages: [{
-            messages: [message],
-            limit: 50,
-            has_more: false,
-            next_cursor: null,
-          }],
-          pageParams: [null],
-        };
-      }
-      if (old.pages.some((page) => page.messages.some((m) => m.id === message.id))) {
-        return old;
-      }
-      return {
-        ...old,
-        pages: old.pages.map((page, index) =>
-          index === 0 ? { ...page, messages: [...page.messages, message] } : page,
-        ),
-      };
-    },
-  );
-}
 
 /**
  * Layout-agnostic chat controller. Holds every piece of chat conversation
@@ -373,6 +341,16 @@ export function useChatController(opts?: { isActive?: boolean }) {
     null;
   const isAgentRuntimeBound = !!activeAgent && hasAgentRuntime(activeAgent);
 
+  // A session outlives the permission that created it. The agent can be flipped
+  // to personal, change owner, or drop this member from its allow-list, and the
+  // server then refuses every send with `invocation_not_allowed` while still
+  // serving the transcript (MUL-4525 — read uses the view gate, send re-runs the
+  // invoke gate). Judge the SESSION's agent, not just the picker list, so the
+  // composer goes read-only up front instead of after the user types
+  // (MUL-6380). Same rule the server enforces, via the shared predicate.
+  const isAgentAccessRevoked =
+    !!activeAgent && !canAssignAgent(activeAgent, user?.id, memberRole);
+
   const agentAvailability = useWorkspaceAgentAvailability();
   const noAgent = agentAvailability === "none";
 
@@ -501,6 +479,17 @@ export function useChatController(opts?: { isActive?: boolean }) {
         });
         return false;
       }
+      // Invoke permission was revoked while this session was open. The server
+      // would refuse with a 403 before persisting anything; not attempting the
+      // send keeps the draft and avoids a pointless roundtrip. The input is
+      // disabled in this state — this is the belt-and-braces guard.
+      if (isAgentAccessRevoked) {
+        apiLogger.warn("sendChatMessage skipped: invoke permission revoked", {
+          sessionId: activeSessionId,
+          agentId: activeAgent.id,
+        });
+        return false;
+      }
       if (pendingTaskId && pendingTask?.supports_queue !== true) {
         apiLogger.warn("sendChatMessage skipped: server does not support follow-up queues", {
           sessionId: activeSessionId,
@@ -592,11 +581,11 @@ export function useChatController(opts?: { isActive?: boolean }) {
         created_at: result.created_at,
         attachments: draftAttachments,
       };
-      appendChatMessageToLatestPageCache(qc, sessionId, sent);
-      qc.setQueryData<ChatMessage[]>(
-        chatKeys.messages(sessionId),
-        (old) => (old ? [...old, sent] : [sent]),
-      );
+      // Single door into the message caches (MUL-5711): idempotent by id, so
+      // this row and the chat:message echo of the same send converge in either
+      // arrival order, and this richer row (it carries the draft attachments)
+      // is never downgraded by the echo, which has no attachments field.
+      upsertChatMessageToCaches(qc, sessionId, sent, { seedIfMissing: true });
       seedAcceptedPendingTask(qc, sessionId, {
         task_id: result.task_id,
         created_at: result.created_at,
@@ -644,6 +633,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
       activeSessionId,
       activeAgent,
       isAgentArchived,
+      isAgentAccessRevoked,
       pendingTask,
       pendingTaskId,
       isAgentRuntimeBound,
@@ -822,6 +812,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
     currentSession,
     isSessionArchived,
     isAgentArchived,
+    isAgentAccessRevoked,
     isAgentRuntimeBound,
     activeAgent,
     noAgent,

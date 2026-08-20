@@ -10,6 +10,11 @@
     "task_list": "Task list",
     "quote": "Quote",
     "url_aria_label": "URL",
+    "link_edit": {
+      "apply": "Apply link",
+      "remove": "Remove link",
+      "close": "Close link editor"
+    },
     "heading_dropdown": {
       "text": "Text",
       "normal_text": "Normal Text",
@@ -72,7 +77,8 @@
     "no_results": "No results",
     "group_current": "Current page",
     "group_recent": "Recently viewed",
-    "group_search": "Search results"
+    "group_search": "Search results",
+    "group_cancelled": "Cancelled"
   },
   "slash_command": {
     "no_skills_configured": "No skills configured",

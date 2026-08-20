@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integration/linear"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
 // IntegrationService handles creating mirror issues from external sources
@@ -120,6 +121,7 @@ func (s *IntegrationService) ImportExternalIssue(
 	}
 
 	issue, err := qtx.CreateIssue(ctx, db.CreateIssueParams{
+		ID:            dbid.NewV7(),
 		WorkspaceID:   workspaceID,
 		Title:         ext.Title,
 		Description:   pgtype.Text{String: description, Valid: description != ""},

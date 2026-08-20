@@ -101,6 +101,64 @@ func TestGetLastChatTaskSessionKeepsHealthyDistinctSession(t *testing.T) {
 	}
 }
 
+// TestGetLastChatTaskSessionExcludesAuthResolutionFailure is the chat half of
+// the auth-resolution resume fix, mirroring GetLastTaskSession: a provider that
+// cannot resolve its own authentication method must not be handed back to the
+// next task on the same chat. The row carries agent_error.unknown — what every
+// daemon version writes for this text — so only the ILIKE guard drops it.
+func TestGetLastChatTaskSessionExcludesAuthResolutionFailure(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	_, agentID, runtimeID := setupRerunTestFixture(t)
+	chatSessionID := newPoisonTestChatSession(t, agentID, runtimeID, "poison-auth-resolve")
+	ctx := context.Background()
+
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, chat_session_id, status, priority, started_at, completed_at, session_id, work_dir, failure_reason, error)
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', now() - interval '1 minute', 'POISONED-CHAT-AUTH', '/tmp/chat', 'agent_error.unknown',
+		        'hermes provider error: "Could not resolve authentication method. Expected either api_key or auth_token to be set. Or for one of the X-Api-Key or Authorization headers to be explicitly omitted"')
+	`, agentID, runtimeID, chatSessionID); err != nil {
+		t.Fatalf("insert poisoned task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	prior, err := queries.GetLastChatTaskSession(ctx, pgtype.UUID{Bytes: parseUUIDBytes(chatSessionID), Valid: true})
+	requireSessionExcluded(t, prior.SessionID, err)
+}
+
+// TestGetLastChatTaskSessionKeepsSessionOnAuthAdjacentError is the chat
+// narrowness half: the ILIKE guard must match the exact provider phrase, not an
+// error that merely resembles it, or a healthy conversation loses its resume
+// context on every follow-up.
+func TestGetLastChatTaskSessionKeepsSessionOnAuthAdjacentError(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	_, agentID, runtimeID := setupRerunTestFixture(t)
+	chatSessionID := newPoisonTestChatSession(t, agentID, runtimeID, "poison-auth-adjacent")
+	ctx := context.Background()
+
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, chat_session_id, status, priority, started_at, completed_at, session_id, work_dir, failure_reason, error)
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', now() - interval '1 minute', 'CHAT-HEALTHY-AUTH', '/tmp/chat', 'agent_error.unknown',
+		        'hermes provider error: could not resolve an authentication method for this model')
+	`, agentID, runtimeID, chatSessionID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	prior, err := queries.GetLastChatTaskSession(ctx, pgtype.UUID{Bytes: parseUUIDBytes(chatSessionID), Valid: true})
+	if err != nil {
+		t.Fatalf("GetLastChatTaskSession failed: %v", err)
+	}
+	if !prior.SessionID.Valid || prior.SessionID.String != "CHAT-HEALTHY-AUTH" {
+		t.Fatalf("an auth-adjacent but non-matching error must not retire the session, got %+v", prior.SessionID)
+	}
+}
+
 // TestRetiredSessionExcludedFromIssueResume covers the case the poison filters
 // structurally cannot see (GH #6066): a fresh-session retry that SUCCEEDS. The
 // recovered task is 'completed' and carries no failure to classify, so the only
@@ -204,7 +262,7 @@ func TestFailTaskClearsPoisonedChatPointer(t *testing.T) {
 	// The un-upgraded-daemon shape: catchall reason, poisoning only in the text.
 	if _, err := taskSvc.FailTask(ctx, pgtype.UUID{Bytes: parseUUIDBytes(taskID), Valid: true},
 		"Invalid request: the message at position 37 with role 'assistant' must not be empty",
-		"CHAT-PTR-S", "/tmp/chat", "agent_error.unknown", false, ""); err != nil {
+		"CHAT-PTR-S", "/tmp/chat", "", "agent_error.unknown", false, "", ""); err != nil {
 		t.Fatalf("FailTask: %v", err)
 	}
 
@@ -248,8 +306,8 @@ func TestFailTaskKeepsChatPointerOnTransientFailure(t *testing.T) {
 	taskSvc := service.NewTaskService(queries, testPool, nil, events.New())
 
 	if _, err := taskSvc.FailTask(ctx, pgtype.UUID{Bytes: parseUUIDBytes(taskID), Valid: true},
-		"Connection closed mid-response", "CHAT-KEEP-S", "/tmp/chat",
-		"agent_error.provider_network", false, ""); err != nil {
+		"Connection closed mid-response", "CHAT-KEEP-S", "/tmp/chat", "",
+		"agent_error.provider_network", false, "", ""); err != nil {
 		t.Fatalf("FailTask: %v", err)
 	}
 
