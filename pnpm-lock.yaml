@@ -163,9 +163,6 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
-      vite:
-        specifier: 8.0.16
-        version: 8.0.16(@types/node@25.5.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.47.1)(tsx@4.23.12)(yaml@2.9.0)
 
   apps/desktop:
     dependencies:
@@ -23990,7 +23987,7 @@ snapshots:
   vite@8.0.16(@types/node@25.5.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.47.1)(tsx@4.23.12)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
-      picomatch: 4.0.4
+      picomatch: 4.0.7
       postcss: 8.5.26
       rolldown: 1.0.3
       tinyglobby: 0.2.17
@@ -24006,7 +24003,7 @@ snapshots:
   vite@8.0.16(@types/node@26.4.0)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.47.1)(tsx@4.23.12)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
-      picomatch: 4.0.4
+      picomatch: 4.0.7
       postcss: 8.5.26
       rolldown: 1.0.3
       tinyglobby: 0.2.17
@@ -24022,7 +24019,7 @@ snapshots:
   vite@8.0.16(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.47.1)(tsx@4.23.12)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
-      picomatch: 4.0.4
+      picomatch: 4.0.7
       postcss: 8.5.26
       rolldown: 1.0.3
       tinyglobby: 0.2.17
