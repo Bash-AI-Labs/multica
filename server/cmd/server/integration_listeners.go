@@ -23,21 +23,8 @@ func registerIntegrationListeners(bus *events.Bus, integrationSvc *service.Integ
 			return
 		}
 
-		issue, ok := payload["issue"].(handler.IssueResponse)
+		issue, ok := externalStatusSyncIssue(payload)
 		if !ok {
-			return
-		}
-
-		// Only sync on status changes to meaningful states.
-		changes, _ := payload["changes"].(map[string]any)
-		if _, hasStatus := changes["status"]; !hasStatus {
-			return
-		}
-
-		switch issue.Status {
-		case "done", "cancelled", "in_progress", "in_review":
-			// proceed
-		default:
 			return
 		}
 
@@ -59,4 +46,20 @@ func registerIntegrationListeners(bus *events.Bus, integrationSvc *service.Integ
 			}
 		}()
 	})
+}
+
+func externalStatusSyncIssue(payload map[string]any) (handler.IssueResponse, bool) {
+	issue, ok := payload["issue"].(handler.IssueResponse)
+	if !ok {
+		return handler.IssueResponse{}, false
+	}
+	if changed, _ := payload["status_changed"].(bool); !changed {
+		return handler.IssueResponse{}, false
+	}
+	switch issue.Status {
+	case "done", "cancelled", "in_progress", "in_review":
+		return issue, true
+	default:
+		return handler.IssueResponse{}, false
+	}
 }

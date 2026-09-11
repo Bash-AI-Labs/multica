@@ -94,7 +94,7 @@ func TestRunTask_StartTaskCalledAfterWorkdirOnDisk(t *testing.T) {
 	workspacesRoot := t.TempDir()
 	workspaceID := "ws-runtask"
 	taskID := "task-runtask-after-mkdir"
-	expectedEnvRoot := execenv.PredictRootDir(workspacesRoot, workspaceID, taskID)
+	expectedEnvRoot := execenv.PredictRootDir(execenv.RootDirParams{WorkspacesRoot: workspacesRoot, WorkspaceID: workspaceID, TaskID: taskID})
 	expectedWorkDir := filepath.Join(expectedEnvRoot, "workdir")
 
 	var (
@@ -168,7 +168,7 @@ func TestRunTask_InjectsPrivateTaskTempDir(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), strings.Repeat("long-workspaces-root-", 3))
 	workspaceID := "ws-private-temp"
 	taskID := "task-private-temp-with-long-id-that-would-overflow-socket-paths"
-	envRoot := execenv.PredictRootDir(workspacesRoot, workspaceID, taskID)
+	envRoot := execenv.PredictRootDir(execenv.RootDirParams{WorkspacesRoot: workspacesRoot, WorkspaceID: workspaceID, TaskID: taskID})
 
 	captureFile := filepath.Join(t.TempDir(), "agent-env.txt")
 	fakeBin := filepath.Join(t.TempDir(), "claude")
@@ -344,11 +344,14 @@ func TestTaskTempBaseDir(t *testing.T) {
 
 	t.Run("configured base creates private 0700 task dir", func(t *testing.T) {
 		t.Setenv("MULTICA_AGENT_TEMP_BASE", validBase)
-		dir, err := ensureTaskTempDir("root", "ws", "task")
+		dir, lock, err := ensureTaskTempDir("root", "ws", "task")
 		if err != nil {
 			t.Fatalf("ensureTaskTempDir(): %v", err)
 		}
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		t.Cleanup(func() {
+			execenv.ReleaseTaskTempLock(lock)
+			_ = os.RemoveAll(dir)
+		})
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat task temp dir: %v", err)
@@ -379,8 +382,9 @@ func TestTaskTempBaseDir(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("MULTICA_AGENT_TEMP_BASE", tc.base)
-			dir, err := ensureTaskTempDir("root", "ws", "task")
+			dir, lock, err := ensureTaskTempDir("root", "ws", "task")
 			if err == nil {
+				execenv.ReleaseTaskTempLock(lock)
 				_ = os.RemoveAll(dir)
 				if tc.base == readOnlyBase {
 					t.Skip("process can write to the read-only fixture")
@@ -658,6 +662,17 @@ func (t *prepareLeaseCountingTransport) RoundTrip(req *http.Request) (*http.Resp
 	return t.base.RoundTrip(req)
 }
 
+// prepareBudgetForBlockedStart is the prepare deadline the blocked-/start test
+// arms. It has to outlast everything runTask does before it calls /start — the
+// isolated execution environment, its sidecars, and the task temp dir are all
+// real filesystem work — because a deadline that expires during preparation
+// never reaches the /start this test is about. That preparation costs ~15ms on
+// an idle developer machine but an order of magnitude more on a loaded CI
+// runner under -race, which is why the original 150ms turned main red
+// (MUL-7244). Two seconds keeps ~20x headroom over the observed CI cost while
+// still bounding the test at roughly the budget itself.
+const prepareBudgetForBlockedStart = 2 * time.Second
+
 func TestRunTask_PrepareTimeoutStopsLeaseDuringBlockedStartTask(t *testing.T) {
 	oldRefresh := taskPrepareLeaseRefresh
 	oldTimeout := taskPrepareLeaseTimeout
@@ -708,7 +723,7 @@ func TestRunTask_PrepareTimeoutStopsLeaseDuringBlockedStartTask(t *testing.T) {
 		workspaces:         make(map[string]*workspaceState),
 		runtimeIndex:       map[string]Runtime{"rt-1": {ID: "rt-1", Provider: "claude"}},
 		activeEnvRoots:     make(map[string]int),
-		taskPrepareTimeout: 150 * time.Millisecond,
+		taskPrepareTimeout: prepareBudgetForBlockedStart,
 		cfg: Config{
 			WorkspacesRoot: workspacesRoot,
 			Agents: map[string]AgentEntry{
@@ -731,13 +746,19 @@ func TestRunTask_PrepareTimeoutStopsLeaseDuringBlockedStartTask(t *testing.T) {
 	if !errors.Is(err, errTaskPrepareTimeout) {
 		t.Fatalf("runTask error = %v, want task prepare timeout", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed > time.Second {
+	if elapsed := time.Since(startedAt); elapsed > prepareBudgetForBlockedStart+time.Second {
 		t.Fatalf("runTask took %s, want prepare deadline to stop blocked /start", elapsed)
 	}
+	// Wait for the handler rather than sampling it: runTask returns as soon as
+	// the deadline cancels the in-flight RoundTrip, which can beat httptest
+	// scheduling the handler goroutine that closes startEntered. The wait only
+	// slows the failing path — when /start was reached the channel is already
+	// closed, and when it was not the budget above was too small to survive
+	// preparation on this machine.
 	select {
 	case <-startEntered:
-	default:
-		t.Fatal("runTask did not reach /start")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runTask did not reach /start: the %s prepare budget expired during preparation", prepareBudgetForBlockedStart)
 	}
 	releaseStartOnce.Do(func() { close(releaseStart) })
 	if got := leaseCalls.Load(); got == 0 {
@@ -784,7 +805,7 @@ func TestHandleTask_KeepsEnvRootActiveAcrossCompletion(t *testing.T) {
 	workspacesRoot := t.TempDir()
 	workspaceID := "ws-active-during-complete"
 	taskID := "task-active-during-complete"
-	expectedEnvRoot := execenv.PredictRootDir(workspacesRoot, workspaceID, taskID)
+	expectedEnvRoot := execenv.PredictRootDir(execenv.RootDirParams{WorkspacesRoot: workspacesRoot, WorkspaceID: workspaceID, TaskID: taskID})
 
 	var (
 		completeCalled   atomic.Bool
@@ -820,7 +841,7 @@ func TestHandleTask_KeepsEnvRootActiveAcrossCompletion(t *testing.T) {
 	// the outer guard added in handleTask, the deferred unmark would bring
 	// isActiveEnvRoot back to false before reportTaskResult fires.
 	d.runner = taskRunnerFunc(func(_ context.Context, tk Task, _ string, _ int, _ *slog.Logger) (TaskResult, error) {
-		predicted := execenv.PredictRootDir(d.cfg.WorkspacesRoot, tk.WorkspaceID, tk.ID)
+		predicted := execenv.PredictRootDir(taskRootDirParams(d.cfg.WorkspacesRoot, tk))
 		d.markActiveEnvRoot(predicted)
 		defer d.unmarkActiveEnvRoot(predicted)
 		return TaskResult{
