@@ -82,9 +82,7 @@ var quickActionTemplateTokenRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
 // reaches nobody, so a prompt may legitimately point at related work.
 var quickActionSideEffectMentionRe = regexp.MustCompile(`mention://(agent|squad|member|all)/`)
 
-// ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 type QuickActionResponse struct {
 	ID           string  `json:"id"`
@@ -139,9 +137,7 @@ type ListQuickActionsResponse struct {
 	QuickActions []QuickActionResponse `json:"quick_actions"`
 }
 
-// ---------------------------------------------------------------------------
 // Validation
-// ---------------------------------------------------------------------------
 
 func validateQuickActionName(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
@@ -194,9 +190,7 @@ func normalizeQuickActionVisibility(raw string) (string, error) {
 	return v, nil
 }
 
-// ---------------------------------------------------------------------------
 // Target resolution
-// ---------------------------------------------------------------------------
 
 // quickActionTarget is the resolved execution target of an action: the agent
 // that will actually run, plus the display identity the client should show.
@@ -412,9 +406,7 @@ func (h *Handler) quickActionToResponse(ctx context.Context, qa db.QuickAction) 
 	return resp
 }
 
-// ---------------------------------------------------------------------------
 // Management gate
-// ---------------------------------------------------------------------------
 
 // requireQuickActionActor resolves the acting member. Agents are rejected: an
 // agent inherits its runtime owner's credentials, and without this an admin's
@@ -476,9 +468,7 @@ func (h *Handler) requirePublicQuickActionRole(w http.ResponseWriter, r *http.Re
 	return ok
 }
 
-// ---------------------------------------------------------------------------
 // Handlers
-// ---------------------------------------------------------------------------
 
 // ListQuickActions returns the workspace catalog. It performs NO permission
 // work: `private` rows are scoped to their creator by the query (that is what
@@ -868,6 +858,19 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "quick action is archived")
 		return
 	}
+	// A quick action carries its OWN configured target, so under the "derived vs
+	// named" rule it could be let through. It is refused in the first phase for a
+	// product reason rather than a rule one: it is an instruction to go and DO
+	// the action, not an invitation to talk, and Triage is where nobody has
+	// agreed the work should be done yet. Opening it later is deleting this if.
+	//
+	// Before the comment is written, not after: a quick action is a comment AND
+	// a run, and posting the prompt to an entry that will never run it leaves an
+	// instruction addressed to nobody (MUL-7189 §2.3).
+	if issue.TriageState.Valid {
+		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonIssueInTriage)
+		return
+	}
 
 	target := h.resolveQuickActionTarget(r.Context(), qa)
 	if !target.Found {
@@ -918,7 +921,7 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		"issue_revision":      created.IssueRevision,
 	})
 
-	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, nil, actorType, actorID, originatorUserID, nil)
+	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, nil, actorType, actorID, originatorUserID, nil, nil)
 
 	// Usage telemetry is best-effort and deliberately outside the run's
 	// success path: a failed counter must never cost the user the run.

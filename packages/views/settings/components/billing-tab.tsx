@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CreditCard,
   ExternalLink,
+  Info,
   Loader2,
   Plus,
   RefreshCw,
@@ -56,6 +57,12 @@ import {
   DialogTitle,
 } from "@multica/ui/components/ui/dialog";
 import { Input } from "@multica/ui/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverTrigger,
+} from "@multica/ui/components/ui/popover";
 import {
   Progress,
   ProgressLabel,
@@ -109,10 +116,7 @@ function formatDate(value: string | null, locale: string): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeZone: "UTC",
-  }).format(date);
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(date);
 }
 
 function formatDateTime(value: string | null, locale: string): string | null {
@@ -537,6 +541,14 @@ function BillingTabContent() {
   };
 
   const reportActionError = (error: unknown, fallback: string) => {
+    const code = errorCode(error);
+    if (
+      code === "workspace_subscriptions_disabled" ||
+      code === "cloud_runtime_not_configured"
+    ) {
+      setActionError(t(($) => $.workspace.errors.not_enabled));
+      return;
+    }
     if (error instanceof ApiError && error.status === 503) {
       setActionError(t(($) => $.workspace.errors.temporarily_unavailable));
       return;
@@ -735,7 +747,7 @@ function BillingTabContent() {
     return (
       <SettingsTab
         title={t(($) => $.workspace.title)}
-        description={t(($) => $.workspace.description)}
+        scope="workspace"
       >
         <SettingsCard>
           <div
@@ -755,7 +767,7 @@ function BillingTabContent() {
     return (
       <SettingsTab
         title={t(($) => $.workspace.title)}
-        description={t(($) => $.workspace.description)}
+        scope="workspace"
       >
         <Alert variant="destructive">
           <AlertCircle />
@@ -848,7 +860,7 @@ function BillingTabContent() {
   return (
     <SettingsTab
       title={t(($) => $.workspace.title)}
-      description={t(($) => $.workspace.description)}
+      scope="workspace"
     >
       {returnResult === "cancel" ? (
         <Alert>
@@ -864,9 +876,6 @@ function BillingTabContent() {
         <Alert>
           <CheckCircle2 />
           <AlertTitle>{t(($) => $.workspace.return.portal_title)}</AlertTitle>
-          <AlertDescription>
-            {t(($) => $.workspace.return.portal_description)}
-          </AlertDescription>
         </Alert>
       ) : null}
 
@@ -994,9 +1003,6 @@ function BillingTabContent() {
           <AlertTitle>
             {t(($) => $.workspace.subscription_notice.canceled_title)}
           </AlertTitle>
-          <AlertDescription>
-            {t(($) => $.workspace.subscription_notice.canceled_description)}
-          </AlertDescription>
         </Alert>
       ) : null}
 
@@ -1012,7 +1018,6 @@ function BillingTabContent() {
         <SettingsCard>
           <SettingsRow
             label={t(($) => $.workspace.current.plan)}
-            description={t(($) => $.workspace.current.plan_description)}
           >
             <div className="flex flex-wrap items-center gap-2 sm:justify-end">
               <Badge variant={planBadgeVariant(entitlements.plan)}>
@@ -1036,9 +1041,6 @@ function BillingTabContent() {
           {summaryQuery.data?.billingInterval ? (
             <SettingsRow
               label={t(($) => $.workspace.current.billing_interval)}
-              description={t(
-                ($) => $.workspace.current.billing_interval_description,
-              )}
             >
               <span>
                 {summaryQuery.data.billingInterval === "month"
@@ -1050,7 +1052,6 @@ function BillingTabContent() {
           {summaryPeriodEnd ? (
             <SettingsRow
               label={t(($) => $.workspace.current.period_end)}
-              description={t(($) => $.workspace.current.period_end_description)}
             >
               <span className="tabular-nums">{summaryPeriodEnd}</span>
             </SettingsRow>
@@ -1169,7 +1170,7 @@ function BillingTabContent() {
               description={
                 portalUnavailable
                   ? t(($) => $.workspace.management.portal_unavailable)
-                  : t(($) => $.workspace.management.portal_description)
+                  : undefined
               }
             >
               {!portalUnavailable ? (
@@ -1193,18 +1194,15 @@ function BillingTabContent() {
 
       <SettingsSection
         title={t(($) => $.workspace.limits.title)}
-        description={t(($) => $.workspace.limits.description)}
       >
         <SettingsCard>
           <SettingsRow
             label={t(($) => $.workspace.limits.issues)}
-            description={t(($) => $.workspace.limits.issues_description)}
           >
             <span className="tabular-nums">{issueLimitValue}</span>
           </SettingsRow>
           <SettingsRow
             label={t(($) => $.workspace.limits.autopilots)}
-            description={t(($) => $.workspace.limits.autopilots_description)}
           >
             {quotaUsage.kind === "unlimited" ? (
               <span className="tabular-nums">
@@ -1389,7 +1387,6 @@ function BillingTabContent() {
           <SettingsCard>
             <SettingsRow
               label={t(($) => $.workspace.seats.human_members)}
-              description={t(($) => $.workspace.seats.human_members_description)}
             >
               <span className="tabular-nums">
                 {t(($) => $.workspace.seats.seat_count, {
@@ -1399,7 +1396,6 @@ function BillingTabContent() {
             </SettingsRow>
             <SettingsRow
               label={t(($) => $.workspace.seats.billed)}
-              description={t(($) => $.workspace.seats.billed_description)}
             >
               {summaryQuery.isPending ? (
                 <Skeleton
@@ -1459,8 +1455,29 @@ function BillingTabContent() {
               )}
             </SettingsRow>
             <SettingsRow
-              label={t(($) => $.workspace.seats.available)}
-              description={t(($) => $.workspace.seats.available_description)}
+              label={
+                <div className="flex items-center gap-1.5">
+                  <span>{t(($) => $.workspace.seats.available)}</span>
+                  <Popover>
+                    <PopoverTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={t(($) => $.workspace.seats.available_help)}
+                        >
+                          <Info className="size-3.5" />
+                        </Button>
+                      }
+                    />
+                    <PopoverContent align="start">
+                      <PopoverDescription>
+                        {t(($) => $.workspace.seats.available_description)}
+                      </PopoverDescription>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              }
             >
               {summaryQuery.isPending ? (
                 <Skeleton
