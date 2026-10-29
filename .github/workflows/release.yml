@@ -56,7 +56,7 @@ jobs:
         with:
           # Keep the security floor even when the setup-go manifest lags;
           # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          go-version: "~1.26.10"
           check-latest: true
           cache-dependency-path: server/go.sum
 
@@ -100,7 +100,7 @@ jobs:
         with:
           # Keep the security floor even when the setup-go manifest lags;
           # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          go-version: "~1.26.10"
           check-latest: true
           cache-dependency-path: server/go.sum
 
@@ -426,7 +426,7 @@ jobs:
         with:
           # Keep the security floor even when the setup-go manifest lags;
           # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          go-version: "~1.26.10"
           check-latest: true
           cache-dependency-path: server/go.sum
 
