@@ -42,10 +42,13 @@ This keeps Docker simple while still isolating schema and data.
 
 ## Prerequisites
 
-- Node.js `22`
+- Node.js `22.12.0` or newer
 - `pnpm` `10.28.2`
 - Go `1.26.9`
 - Docker
+
+See [Node dependency security](docs/dependency-security.md) for dependency
+upgrade boundaries and mitigations for tracked upstream advisories.
 
 ## Important Rules
 

@@ -2,7 +2,6 @@ import { source } from "@/lib/source";
 import { DocsPage, DocsBody } from "fumadocs-ui/page";
 import { notFound } from "next/navigation";
 import defaultMdxComponents from "fumadocs-ui/mdx";
-import { ImageZoom } from "fumadocs-ui/components/image-zoom";
 import type { Metadata } from "next";
 import { DocsHero } from "@/components/hero";
 import { NumberedCards, NumberedCard, NumberedSteps, Step } from "@/components/editorial";
@@ -12,6 +11,7 @@ import { i18n, type Lang } from "@/lib/i18n";
 import { homeCopy } from "@/lib/translations";
 import { docsAlternates } from "@/lib/site";
 import { DocsLocaleProvider, LocaleLink } from "@/components/locale-link";
+import { DocsImage } from "@/components/docs-image";
 
 function asLang(lang: string): Lang {
   return (i18n.languages as readonly string[]).includes(lang)
@@ -60,7 +60,7 @@ export default async function Page({
             components={{
               ...defaultMdxComponents,
               // Same lightbox mapping as [...slug]/page.tsx — keep in sync.
-              img: (props) => <ImageZoom {...props} />,
+              img: DocsImage,
               a: LocaleLink,
               NumberedCards,
               NumberedCard,
