@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
 @import "../../../packages/ui/styles/tokens.css";
 
@@ -52,6 +53,10 @@ html[lang|="ja"] {
 
 :root {
   --fd-page-width: 1080px;
+}
+
+#nd-docs-layout {
+  --fd-layout-width: calc(var(--fd-page-width) + var(--fd-sidebar-width));
 }
 
 /* ---------------------------------------------------------------------------
@@ -160,6 +165,7 @@ html[lang|="ja"] {
  * canvas. Fumadocs renders it as #nd-sidebar (desktop) and
  * #nd-sidebar-mobile (mobile drawer); both IDs need the override. */
 #nd-sidebar,
+.dark #nd-sidebar,
 #nd-sidebar-mobile {
   --color-fd-background: var(--sidebar);
   --color-fd-foreground: var(--sidebar-foreground);
