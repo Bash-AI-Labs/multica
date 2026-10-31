@@ -31,10 +31,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { ExtraProps } from "react-markdown";
-import { Check, Copy, Maximize2, RotateCcw } from "lucide-react";
+import { Check, Copy, Maximize2, RotateCcw } from "@multica/ui/icons";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../i18n";
+import { DeferredTooltip } from "../common/deferred-tooltip";
 import { RichTableDialog } from "./rich-table-dialog";
 import {
   columnWidthKey,
@@ -392,12 +393,13 @@ export function RichTableFrame({ model, getMarkdown, tableRef: onTable, children
     "flex h-6 items-center justify-center gap-1 rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
   return (
-    <div className="rich-table group/table" data-resized={resized ? "" : undefined}>
-      {/* A row of its own above the table: over the table it would cover the
-          last columns' headers and resize handles. */}
+    <div className="rich-table group/table relative" data-resized={resized ? "" : undefined}>
+      {/* Above the table, inside its top margin: over the table it would cover
+          the last columns' headers and resize handles, and in the flow it
+          would make the space above the table taller than the space below. */}
       <div
         {...chrome}
-        className="rich-table-toolbar flex h-7 items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover/table:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
+        className="rich-table-toolbar absolute right-0 bottom-full flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover/table:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
       >
         {resized && (
           <button type="button" onClick={resetWidths} className={cn(toolbarButton, "px-1.5 text-caption")}>
@@ -405,24 +407,32 @@ export function RichTableFrame({ model, getMarkdown, tableRef: onTable, children
             {t(($) => $.table.reset_widths)}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className={cn(toolbarButton, "w-6")}
-          title={t(($) => $.table.expand)}
-          aria-label={t(($) => $.table.expand)}
-        >
-          <Maximize2 className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={copyMarkdown}
-          className={cn(toolbarButton, "w-6")}
-          title={copied ? t(($) => $.table.copied) : t(($) => $.table.copy_markdown)}
-          aria-label={t(($) => $.table.copy_markdown)}
-        >
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-        </button>
+        <DeferredTooltip
+          content={t(($) => $.table.expand)}
+          trigger={
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className={cn(toolbarButton, "w-6")}
+              aria-label={t(($) => $.table.expand)}
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          }
+        />
+        <DeferredTooltip
+          content={copied ? t(($) => $.table.copied) : t(($) => $.table.copy_markdown)}
+          trigger={
+            <button
+              type="button"
+              onClick={copyMarkdown}
+              className={cn(toolbarButton, "w-6")}
+              aria-label={t(($) => $.table.copy_markdown)}
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </button>
+          }
+        />
       </div>
       <div className="relative">
         <div ref={wrapperRef} className="tableWrapper">
