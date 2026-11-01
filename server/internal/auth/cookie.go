@@ -167,16 +167,20 @@ func cookieDomain() string {
 }
 
 // isSecureCookie reports whether session cookies should carry the Secure flag.
-// Derived from the scheme of FRONTEND_ORIGIN — browsers silently drop Secure
-// cookies received on a plain-HTTP page, so the flag has to track the actual
-// user-facing scheme rather than a coarser environment name.
+// MULTICA_APP_URL is the canonical public URL when configured, with
+// FRONTEND_ORIGIN as the fallback. Browsers silently drop Secure cookies
+// received on a plain-HTTP page, so explicit HTTP local development remains
+// supported.
 func isSecureCookie() bool {
-	raw := strings.TrimSpace(os.Getenv("FRONTEND_ORIGIN"))
+	raw := strings.TrimSpace(os.Getenv("MULTICA_APP_URL"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("FRONTEND_ORIGIN"))
+	}
 	if raw == "" {
 		return false
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return false
 	}
 	return strings.EqualFold(u.Scheme, "https")

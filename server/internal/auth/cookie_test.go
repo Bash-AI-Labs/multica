@@ -10,22 +10,25 @@ import (
 func TestIsSecureCookie(t *testing.T) {
 	cases := []struct {
 		name           string
+		appURL         string
 		frontendOrigin string
 		want           bool
 	}{
-		{"https origin → Secure", "https://app.example.com", true},
-		{"https with port", "https://app.example.com:8443", true},
-		{"http origin → not Secure", "http://192.168.5.5:13000", false},
-		{"http localhost → not Secure", "http://localhost:3000", false},
-		{"empty → not Secure", "", false},
-		{"malformed → not Secure", "::not-a-url", false},
-		{"uppercase scheme still matches", "HTTPS://app.example.com", true},
+		{"https app URL → Secure", "https://app.example.com", "http://localhost:3000", true},
+		{"https origin fallback → Secure", "", "https://app.example.com", true},
+		{"https with port", "", "https://app.example.com:8443", true},
+		{"http app URL → not Secure", "http://192.168.5.5:13000", "https://app.example.com", false},
+		{"http localhost → not Secure", "", "http://localhost:3000", false},
+		{"empty → not Secure", "", "", false},
+		{"malformed → not Secure", "", "::not-a-url", false},
+		{"uppercase scheme still matches", "", "HTTPS://app.example.com", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MULTICA_APP_URL", tc.appURL)
 			t.Setenv("FRONTEND_ORIGIN", tc.frontendOrigin)
 			if got := isSecureCookie(); got != tc.want {
-				t.Errorf("isSecureCookie() = %v, want %v (FRONTEND_ORIGIN=%q)", got, tc.want, tc.frontendOrigin)
+				t.Errorf("isSecureCookie() = %v, want %v (MULTICA_APP_URL=%q, FRONTEND_ORIGIN=%q)", got, tc.want, tc.appURL, tc.frontendOrigin)
 			}
 		})
 	}
@@ -61,6 +64,7 @@ func TestCookieDomain(t *testing.T) {
 // The cookie must land with no Domain attribute and Secure=false so browsers
 // actually store it.
 func TestSetAuthCookies_HTTPSelfHost(t *testing.T) {
+	t.Setenv("MULTICA_APP_URL", "")
 	t.Setenv("FRONTEND_ORIGIN", "http://192.168.5.5:13000")
 	t.Setenv("COOKIE_DOMAIN", "192.168.5.5")
 
@@ -115,7 +119,8 @@ func TestParseAuthTokenTTL(t *testing.T) {
 }
 
 func TestSetAuthCookies_HTTPSProduction(t *testing.T) {
-	t.Setenv("FRONTEND_ORIGIN", "https://app.example.com")
+	t.Setenv("MULTICA_APP_URL", "https://app.example.com")
+	t.Setenv("FRONTEND_ORIGIN", "http://localhost:3000")
 	t.Setenv("COOKIE_DOMAIN", "app.example.com")
 
 	rec := httptest.NewRecorder()
@@ -129,6 +134,33 @@ func TestSetAuthCookies_HTTPSProduction(t *testing.T) {
 		}
 		if c.Domain != "app.example.com" {
 			t.Errorf("cookie %q Domain = %q, want %q", c.Name, c.Domain, "app.example.com")
+		}
+	}
+}
+
+func TestAuthCookieVisibilityAttributes(t *testing.T) {
+	t.Setenv("MULTICA_APP_URL", "https://app.example.com")
+	t.Setenv("FRONTEND_ORIGIN", "")
+
+	setRecorder := httptest.NewRecorder()
+	if err := SetAuthCookies(setRecorder, "test-token"); err != nil {
+		t.Fatalf("SetAuthCookies: %v", err)
+	}
+	clearRecorder := httptest.NewRecorder()
+	ClearAuthCookies(clearRecorder)
+
+	for name, cookies := range map[string][]*http.Cookie{
+		"set":   setRecorder.Result().Cookies(),
+		"clear": clearRecorder.Result().Cookies(),
+	} {
+		for _, cookie := range cookies {
+			if !cookie.Secure {
+				t.Errorf("%s cookie %q missing Secure flag", name, cookie.Name)
+			}
+			wantHTTPOnly := cookie.Name == AuthCookieName
+			if cookie.HttpOnly != wantHTTPOnly {
+				t.Errorf("%s cookie %q HttpOnly = %v, want %v", name, cookie.Name, cookie.HttpOnly, wantHTTPOnly)
+			}
 		}
 	}
 }

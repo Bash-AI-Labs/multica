@@ -59,12 +59,11 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 		return true
 	}
 
-	reject := func(status int, msg, selector, value string) bool {
+	reject := func(status int, msg, selector string) bool {
 		slog.Warn("auth: task token workspace selector rejected",
 			"path", r.URL.Path,
 			"method", r.Method,
 			"selector", selector,
-			"value", value,
 			"bound_workspace_id", boundWorkspaceID,
 			"status", status,
 		)
@@ -88,10 +87,10 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 			}
 			parsed, err := util.ParseUUID(v)
 			if err != nil {
-				return reject(http.StatusBadRequest, "invalid workspace_id", sel.name, v)
+				return reject(http.StatusBadRequest, "invalid workspace_id", sel.name)
 			}
 			if util.UUIDToString(parsed) != boundWorkspaceID {
-				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, v)
+				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name)
 			}
 		}
 	}
@@ -116,7 +115,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 				ws, err := queries.GetWorkspaceBySlug(r.Context(), slug)
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
-						return reject(http.StatusNotFound, "workspace not found", sel.name, slug)
+						return reject(http.StatusNotFound, "workspace not found", sel.name)
 					}
 					slog.Error("auth: task token workspace slug lookup failed", "path", r.URL.Path, "error", err)
 					writeError(w, http.StatusInternalServerError, "failed to resolve workspace")
@@ -126,7 +125,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 				resolved[slug] = id
 			}
 			if id != boundWorkspaceID {
-				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, slug)
+				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name)
 			}
 		}
 	}
