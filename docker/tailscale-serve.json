@@ -64,6 +64,7 @@
     }
   },
   "AllowFunnel": {
+    "${TS_CERT_DOMAIN}:443": true,
     "8443": true
   }
 }

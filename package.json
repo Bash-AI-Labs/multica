@@ -28,8 +28,8 @@
     "check:ui-radii": "node scripts/check-ui-radius-tokens.mjs",
     "clean": "turbo clean && rm -rf node_modules",
     "ui:add": "cd packages/ui && npx shadcn@latest add",
-    "generate:reserved-slugs": "node scripts/generate-reserved-slugs.mjs",
-    "dev:ui-lab": "pnpm --filter @multica/ui-lab dev"
+    "generate:attachment-text-preview": "node scripts/generate-attachment-text-preview.mjs",
+    "generate:reserved-slugs": "node scripts/generate-reserved-slugs.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -72,7 +72,8 @@
       "ws@>=7.0.0 <7.5.11": "^7.5.11",
       "ws@>=8.0.0 <8.21.0": "^8.21.3",
       "zod@>=4.0.0 <4.6.6": "^4.6.7",
-      "builder-util-runtime": "9.7.0"
+      "builder-util-runtime": "9.7.0",
+      "node-forge@<1.4.1": "^1.4.1"
     },
     "patchedDependencies": {
       "expo-modules-core@57.0.21": "apps/mobile/patches/expo-modules-core@57.0.21.patch"

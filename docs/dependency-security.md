@@ -1,11 +1,14 @@
 # Node dependency security
 
-The 2026-10-29 remediation reduces `pnpm audit` from 252 distinct advisory
-records (276 dependency-path findings) to two records: one high and one low.
-Both remaining packages have no published fix. `pnpm audit --prod` reports
-the same two records because Expo declares its CLI/configuration tools as
-production dependencies; these are development/build-time paths, not imports
-in the mobile application's runtime source.
+The 2026-10-29 remediation reduced `pnpm audit` from 252 distinct advisory
+records (276 dependency-path findings) to two. After merging upstream v0.7.2
+on 2026-10-31 (which added new Expo 57 and MCP SDK paths) and pinning
+`node-forge` to its patched 1.4.x line, `pnpm audit` reports no critical or
+high advisories: three records remain (two moderate, one low), all in
+build-time tooling. Expo declares its CLI/configuration tools as production
+dependencies, so `pnpm audit --prod` also reports the Expo paths; these are
+development/build-time paths, not imports in the mobile application's runtime
+source.
 
 No advisories are suppressed. Both audit commands still exit with status 1.
 Re-run them when updating the lockfile; the advisory database can change:
@@ -17,9 +20,8 @@ pnpm audit --prod --json
 
 ## Upgrade boundaries
 
-- Electron uses the supported 43.x line rather than the unsupported 39.x
-  line. This stays within two majors of Electron 45 while preserving macOS 12
-  support and avoiding Electron 44's clipboard API removal. See the
+- Electron follows upstream onto the supported 44.x line, which already
+  accounts for Electron 44's clipboard API removal. See the
   [Electron breaking changes](https://www.electronjs.org/docs/latest/breaking-changes).
   Node 22.12.0 or newer is required for the desktop toolchain.
 - Fumadocs MDX 15 requires Fumadocs core 16. The documentation UI moves with
@@ -44,16 +46,18 @@ pnpm audit --prod --json
 
 | Former dependency path | Resolution |
 | --- | --- |
-| `apps/desktop -> electron -> extract-zip` | Electron 43 replaces it with the maintained `@electron-internal/extract-zip` fork. Only install pinned Electron artifacts from the official download source; do not disable the downloader's checksum validation or supply untrusted ZIPs/mirrors. Track [the symlink advisory](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3). |
+| `apps/desktop -> electron -> extract-zip` | Electron 44 uses the maintained `@electron-internal/extract-zip` fork. Only install pinned Electron artifacts from the official download source; do not disable the downloader's checksum validation or supply untrusted ZIPs/mirrors. Track [the symlink advisory](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3). |
 | `apps/docs -> fumadocs-core -> image-size` | Fumadocs core 16 replaces it with `@fumari/image-size`. Documentation image processing remains a build-time operation over reviewed repository content. Track [the parser advisory](https://github.com/advisories/GHSA-5p2g-fcmc-qvqq). |
 | `mermaid -> dompurify` | DOMPurify resolves to 3.4.17, clearing the reported advisories. Mermaid remains in `securityLevel: "strict"` and receives strings, not hostile live DOM nodes. Do not introduce `IN_PLACE` sanitization of caller-supplied nodes. The earlier unpatched advisory currently lists versions through 3.4.6: [upstream tracking](https://github.com/cure53/DOMPurify/security/advisories/GHSA-x4vx-rjvf-j5p4). |
 | Application dependencies on `shadcn` | Removed the CLI from web, desktop and UI Lab. Its only application import was a small stylesheet; equivalent state variants, accordion keyframes and scrollbar utilities now live in `packages/ui/styles/base.css`, with compiled-CSS regression coverage. Components remain vendored and `pnpm ui:add` still invokes the CLI separately. |
+| `apps/mobile -> expo -> @expo/cli -> node-forge` | Pinned to the patched 1.4.x line with a bounded `node-forge@<1.4.1` override, clearing [GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv) and the later Forge advisories. |
 
 ## Remaining upstream advisories and mitigations
 
 | Audit severity | Package and dependency path | Exposure-reducing mitigation | Upstream tracking |
 | --- | --- | --- | --- |
-| High | `node-forge@1.4.0`: `apps/mobile -> expo -> @expo/cli -> node-forge` | The traced CLI code reads a selected certificate from the macOS keychain to inspect its subject; it does not use RSA signature verification there. Use only locally provisioned, trusted signing certificates. Do not import certificates from untrusted attachments or expose signing/configuration tooling as a service. Keep signing credentials out of untrusted PR builds. | [Forge issue 1149](https://github.com/digitalbazaar/forge/issues/1149), [fix PR 1152](https://github.com/digitalbazaar/forge/pull/1152), [GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv) |
+| Moderate | `minimatch@3.x/5.x/9.x/10.x`: `apps/desktop -> electron-builder -> app-builder-lib -> @electron/asar`, `@electron/universal` (and Expo lint tooling) | The fix only ships in minimatch 11, a major jump the packaging tools have not adopted. Patterns come from repository-controlled build configuration, not user input. Do not pass untrusted glob patterns to packaging or lint tooling. | [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) |
+| Moderate | `glob@13.0.6`: `apps/mobile -> expo -> @expo/cli -> glob` | The fix ships in glob 14, a major jump Expo CLI has not adopted. The CLI walks the local project tree only; do not run it against untrusted directories as a service. | [GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) |
 | Low | `deepmerge@4.3.1`: `apps/mobile -> expo -> @expo/config -> deepmerge` | Expo merges local application configuration and config-plugin properties. Keep those inputs reviewed and repository-controlled; never feed user uploads or remotely supplied JSON into native configuration/prebuild. Run untrusted contributor builds without secrets in isolated workers. | [deepmerge issue 273](https://github.com/TehShrike/deepmerge/issues/273), [GHSA-gcqx-w48m-w2h4](https://github.com/advisories/GHSA-gcqx-w48m-w2h4) |
 
 These are mitigations, not patched packages or proof that every possible

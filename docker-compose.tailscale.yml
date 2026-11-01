@@ -15,7 +15,11 @@
 #        https://<TS_HOSTNAME>.<tailnet>.ts.net  (HTTPS, auto-cert via Tailscale Serve)
 #
 # Security:
-#   - Only your Tailscale devices can reach this. It is invisible to the public internet.
+#   - The app (:443) is published with Tailscale Funnel so invited people can use it
+#     from any browser. Before exposing it, set in .env: MULTICA_LOCAL_MODE=false,
+#     APP_ENV=production, ALLOW_SIGNUP=false, and a working RESEND_API_KEY/SMTP so
+#     sign-in codes and invitations can be emailed. Remove the ":443" AllowFunnel
+#     entry in docker/tailscale-serve.json to make it tailnet-only again.
 #   - HTTPS is enabled via Tailscale Serve with auto-provisioned TLS certificates.
 #   - The hostname is configurable so it's not obvious what the service is.
 
