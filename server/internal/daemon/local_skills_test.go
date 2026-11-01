@@ -230,6 +230,7 @@ func TestListRuntimeLocalSkills_ClaudeEnabledPlugin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !supported || len(skills) != 1 {
 		t.Fatalf("supported=%v skills=%#v", supported, skills)
 	}
@@ -247,6 +248,44 @@ func TestListRuntimeLocalSkills_ClaudeEnabledPlugin(t *testing.T) {
 	}
 	if bundle.Name != got.Key || bundle.Description != "Turn a design into code" {
 		t.Fatalf("plugin bundle = %#v", bundle)
+	}
+}
+
+func TestLoadRuntimeLocalSkillBundleRejectsPluginPrefixTraversal(t *testing.T) {
+	home := t.TempDir()
+	redirectTestHome(t, home)
+	installPath := writeTestClaudePlugin(t, home, "paper-desktop@paper", "paper-desktop", true)
+	writeTestLocalSkill(t, installPath, "outside", map[string]string{
+		"SKILL.md": "---\nname: Outside\n---\n",
+	})
+
+	for _, key := range []string{
+		"paper-desktop:../outside",
+		`paper-desktop:..\outside`,
+		"paper-desktop:/outside",
+	} {
+		bundle, supported, err := loadRuntimeLocalSkillBundle("claude", key)
+		if !supported {
+			t.Fatalf("claude should be supported for %q", key)
+		}
+		if err == nil {
+			t.Errorf("loadRuntimeLocalSkillBundle(%q) succeeded with bundle %+v", key, bundle)
+		}
+	}
+}
+
+func TestNormalizeLocalSkillKeyAcceptsCanonicalNestedKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"review-helper", "release/reporter", "paper-desktop:design-to-code", "..notes"} {
+		if got, err := normalizeLocalSkillKey(key); err != nil || got != key {
+			t.Errorf("normalizeLocalSkillKey(%q) = %q, %v", key, got, err)
+		}
+	}
+	for _, key := range []string{"", "../escape", "safe/../escape", `safe\escape`, "/absolute", "C:/absolute"} {
+		if got, err := normalizeLocalSkillKey(key); err == nil || got != "" {
+			t.Errorf("normalizeLocalSkillKey(%q) = %q, %v; want rejection", key, got, err)
+		}
 	}
 }
 

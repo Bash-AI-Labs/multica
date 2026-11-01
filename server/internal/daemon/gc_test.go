@@ -2456,6 +2456,7 @@ func createGCGitRepo(t *testing.T) string {
 	}
 	runGitForGC(t, repoDir, "add", "README.md")
 	runGitForGC(t, repoDir, "commit", "-m", "initial commit")
+	t.Cleanup(repocache.TrustLocalRepositoryForTesting(repoDir))
 	return repoDir
 }
 

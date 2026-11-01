@@ -29,25 +29,20 @@ func isolateWorktreeIdentityContext(ctx context.Context, barePath, checkoutPath 
 		// cache's identity. Preserve their intentional repository identity.
 		return nil
 	}
-	out, err := runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return fmt.Errorf("resolve linked worktree common dir: %w", err)
-	}
-	commonDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(checkoutPath, commonDir)
-	}
-	if !sameResolvedPath(commonDir, barePath) {
-		return fmt.Errorf("linked worktree common dir %s does not match cache %s", commonDir, barePath)
+	if err := validateLinkedWorktreeContext(ctx, barePath, checkoutPath); err != nil {
+		return err
 	}
 	if err := enableWorktreeConfigContext(ctx, barePath); err != nil {
 		return err
 	}
-	out, err = runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--absolute-git-dir")
+	out, err := runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return fmt.Errorf("resolve worktree config directory: %w", err)
 	}
-	gitDir := strings.TrimSpace(string(out))
+	gitDir, err := requirePathWithin(barePath, strings.TrimSpace(string(out)), "worktree Git directory")
+	if err != nil {
+		return err
+	}
 	out, err = runGitOutputContext(ctx, "-C", checkoutPath, "config", "--null", "--show-scope", "--includes", "--get-regexp", `^(user|author|committer)\.(name|email)$`)
 	var exitErr *exec.ExitError
 	if err != nil && !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1) {
@@ -70,17 +65,61 @@ func isolateWorktreeIdentityContext(ctx context.Context, barePath, checkoutPath 
 			fmt.Fprintf(&config, "\t%s = %s\n", field, quoteGitConfig(values[section+"."+field]))
 		}
 	}
-	if err := editGitConfigFile(filepath.Join(gitDir, "multica-identity.config"), func(_ []byte, _ string) ([]byte, error) {
+	identityPath, err := joinUnder(gitDir, "multica-identity.config")
+	if err != nil {
+		return err
+	}
+	if err := editGitConfigFile(identityPath, func(_ []byte, _ string) ([]byte, error) {
 		return []byte(config.String()), nil
 	}); err != nil {
 		return err
 	}
-	return editGitConfigFile(filepath.Join(gitDir, "config.worktree"), func(contents []byte, _ string) ([]byte, error) {
+	worktreeConfigPath, err := joinUnder(gitDir, "config.worktree")
+	if err != nil {
+		return err
+	}
+	return editGitConfigFile(worktreeConfigPath, func(contents []byte, _ string) ([]byte, error) {
 		if strings.HasPrefix(string(contents), identityConfigInclude) {
 			return contents, nil
 		}
 		return append([]byte(identityConfigInclude), contents...), nil
 	})
+}
+
+func validateLinkedWorktreeContext(ctx context.Context, barePath, checkoutPath string) error {
+	if err := validateCheckoutRootContext(ctx, checkoutPath); err != nil {
+		return err
+	}
+	out, err := runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve linked worktree common dir: %w", err)
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(commonDir) {
+		if !filepath.IsLocal(commonDir) {
+			return fmt.Errorf("linked worktree common dir %q is not local", commonDir)
+		}
+		commonDir, err = joinUnder(checkoutPath, commonDir)
+		if err != nil {
+			return fmt.Errorf("resolve linked worktree common dir: %w", err)
+		}
+	}
+	if !sameResolvedPath(commonDir, barePath) {
+		return fmt.Errorf("linked worktree common dir %s does not match cache %s", commonDir, barePath)
+	}
+	return nil
+}
+
+func validateCheckoutRootContext(ctx context.Context, checkoutPath string) error {
+	out, err := runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("resolve checkout root: %w", err)
+	}
+	root := strings.TrimSpace(string(out))
+	if !sameResolvedPath(root, checkoutPath) {
+		return fmt.Errorf("Git checkout root %s does not match managed path %s", root, checkoutPath)
+	}
+	return nil
 }
 
 func quoteGitConfig(value string) string {
@@ -93,7 +132,10 @@ func quoteGitConfig(value string) string {
 // existing linked worktrees never see the bare cache's core.bare=true applied
 // to themselves. No shared identity keys are removed or rewritten.
 func enableWorktreeConfigContext(ctx context.Context, barePath string) error {
-	configPath := filepath.Join(barePath, "config")
+	configPath, err := joinUnder(barePath, "config")
+	if err != nil {
+		return fmt.Errorf("resolve bare repository config: %w", err)
+	}
 	// Once migrated, identity setup only needs private worktree files. Do not
 	// compete with agent-side git config writers for the common config lock.
 	if enabled, err := worktreeConfigEnabledContext(ctx, configPath); err != nil || enabled {
@@ -114,7 +156,11 @@ func enableWorktreeConfigContext(ctx context.Context, barePath string) error {
 				return nil, err
 			}
 			value := strings.TrimSuffix(string(out), "\n")
-			if err := runGitContext(ctx, "config", "--file", filepath.Join(barePath, "config.worktree"), key, value); err != nil {
+			worktreeConfigPath, err := joinUnder(barePath, "config.worktree")
+			if err != nil {
+				return nil, err
+			}
+			if err := runGitContext(ctx, "config", "--file", worktreeConfigPath, key, value); err != nil {
 				return nil, err
 			}
 			if err := runGitContext(ctx, "config", "--file", lockPath, "--unset-all", key); err != nil {

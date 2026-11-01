@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,7 +64,8 @@ func TestGitEnv(t *testing.T) {
 		t.Error("gitEnv() must include HOME from os.Environ()")
 	}
 
-	// Must set safe.directory=* via GIT_CONFIG env vars.
+	// Must set safe.directory=* and safe.bareRepository=all via
+	// GIT_CONFIG env vars.
 	envHas := func(env []string, want string) bool {
 		for _, e := range env {
 			if e == want {
@@ -72,11 +74,19 @@ func TestGitEnv(t *testing.T) {
 		}
 		return false
 	}
-	if !envHas(env, "GIT_CONFIG_KEY_0=safe.directory") {
-		t.Error("gitEnv() must include GIT_CONFIG_KEY_0=safe.directory (no pre-existing config)")
+	configCount := 0
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") {
+			configCount, _ = strconv.Atoi(strings.TrimPrefix(entry, "GIT_CONFIG_COUNT="))
+		}
 	}
-	if !envHas(env, "GIT_CONFIG_VALUE_0=*") {
-		t.Error("gitEnv() must include GIT_CONFIG_VALUE_0=*")
+	if !envHas(env, "GIT_CONFIG_KEY_"+strconv.Itoa(configCount)+"=safe.directory") ||
+		!envHas(env, "GIT_CONFIG_VALUE_"+strconv.Itoa(configCount)+"=*") {
+		t.Error("gitEnv() must append safe.directory=*")
+	}
+	if !envHas(env, "GIT_CONFIG_KEY_"+strconv.Itoa(configCount+1)+"=safe.bareRepository") ||
+		!envHas(env, "GIT_CONFIG_VALUE_"+strconv.Itoa(configCount+1)+"=all") {
+		t.Error("gitEnv() must append safe.bareRepository=all")
 	}
 }
 
@@ -101,14 +111,20 @@ func TestGitEnvPreservesExistingConfig(t *testing.T) {
 	}
 
 	// safe.directory must be appended at index 2 (next available).
-	if !envHas("GIT_CONFIG_COUNT=3") {
-		t.Error("expected GIT_CONFIG_COUNT=3")
+	if !envHas("GIT_CONFIG_COUNT=4") {
+		t.Error("expected GIT_CONFIG_COUNT=4")
 	}
 	if !envHas("GIT_CONFIG_KEY_2=safe.directory") {
 		t.Error("expected GIT_CONFIG_KEY_2=safe.directory")
 	}
 	if !envHas("GIT_CONFIG_VALUE_2=*") {
 		t.Error("expected GIT_CONFIG_VALUE_2=*")
+	}
+	if !envHas("GIT_CONFIG_KEY_3=safe.bareRepository") {
+		t.Error("expected GIT_CONFIG_KEY_3=safe.bareRepository")
+	}
+	if !envHas("GIT_CONFIG_VALUE_3=all") {
+		t.Error("expected GIT_CONFIG_VALUE_3=all")
 	}
 
 	// Original entries must still be present.
@@ -362,6 +378,9 @@ func TestCreateWorktreeContextReturnsBusyAfterBoundedLockWait(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(barePath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := recordCacheOriginURL(barePath, repoURL); err != nil {
+		t.Fatal(err)
+	}
 
 	lock := cache.lockForRepo(barePath)
 	lock.Lock()
@@ -400,6 +419,9 @@ func TestCreateWorktreeContextCancelsRunningGitProcessTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(barePath, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCacheOriginURL(barePath, repoURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -551,6 +573,7 @@ func createTestRepoAt(t *testing.T, dir string) string {
 			t.Skipf("git setup failed: %s: %v", out, err)
 		}
 	}
+	t.Cleanup(TrustLocalRepositoryForTesting(dir))
 	return dir
 }
 

@@ -43,6 +43,11 @@ import (
 // directory owner.
 func gitEnv() []string {
 	base := os.Environ()
+	allowedProtocols := "http:https:ssh:git"
+	trustedLocalRepositoriesForTesting.Range(func(_, _ any) bool {
+		allowedProtocols += ":file"
+		return false
+	})
 
 	// Find the existing GIT_CONFIG_COUNT so we append at the next index
 	// rather than overwriting any env-scoped git config (auth, URL
@@ -56,13 +61,17 @@ func gitEnv() []string {
 		}
 	}
 
-	idx := strconv.Itoa(existing)
+	idxDir := strconv.Itoa(existing)
+	idxBare := strconv.Itoa(existing + 1)
 	return append(base,
 		"GIT_TERMINAL_PROMPT=0",
 		"GCM_INTERACTIVE=never",
-		"GIT_CONFIG_COUNT="+strconv.Itoa(existing+1),
-		"GIT_CONFIG_KEY_"+idx+"=safe.directory",
-		"GIT_CONFIG_VALUE_"+idx+"=*",
+		"GIT_ALLOW_PROTOCOL="+allowedProtocols,
+		"GIT_CONFIG_COUNT="+strconv.Itoa(existing+2),
+		"GIT_CONFIG_KEY_"+idxDir+"=safe.directory",
+		"GIT_CONFIG_VALUE_"+idxDir+"=*",
+		"GIT_CONFIG_KEY_"+idxBare+"=safe.bareRepository",
+		"GIT_CONFIG_VALUE_"+idxBare+"=all",
 	)
 }
 
@@ -403,7 +412,10 @@ func (c *Cache) Sync(workspaceID string, repos []RepoInfo) error {
 // SyncContext is Sync with cancellation propagated through repo lock waits,
 // clone, fetch, and ref-layout migration.
 func (c *Cache) SyncContext(ctx context.Context, workspaceID string, repos []RepoInfo) error {
-	wsDir := filepath.Join(c.root, workspaceID)
+	wsDir, err := workspaceCacheDir(c.root, workspaceID)
+	if err != nil {
+		return fmt.Errorf("invalid workspace cache path: %w", err)
+	}
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		return fmt.Errorf("create workspace cache dir: %w", err)
 	}
@@ -416,13 +428,26 @@ func (c *Cache) SyncContext(ctx context.Context, workspaceID string, repos []Rep
 		if repo.URL == "" {
 			continue
 		}
-		barePath := filepath.Join(wsDir, bareDirName(repo.URL))
+		barePath, err := repositoryCachePath(c.root, workspaceID, repo.URL)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("invalid repository URL %q: %w", repo.URL, err)
+			}
+			continue
+		}
 
 		repoLock := c.lockForRepo(barePath)
 		if err := repoLock.LockContext(ctx); err != nil {
 			return err
 		}
 		if isBareRepo(barePath) {
+			if !cachedRepoMatchesURLContext(ctx, barePath, repo.URL) {
+				repoLock.Unlock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("repository cache path collision for %q", repo.URL)
+				}
+				continue
+			}
 			// Already cached — fetch latest.
 			c.logger.Info("repo cache: fetching", "url", repo.URL, "path", barePath)
 			c.configureRepoCABundleLogged(ctx, barePath)
@@ -451,7 +476,7 @@ func (c *Cache) SyncContext(ctx context.Context, workspaceID string, repos []Rep
 // Returns "" if not cached.
 func (c *Cache) Lookup(workspaceID, url string) string {
 	barePath := c.BarePath(workspaceID, url)
-	if isBareRepo(barePath) {
+	if isBareRepo(barePath) && cachedRepoMatchesURL(barePath, url) {
 		return barePath
 	}
 	return ""
@@ -462,7 +487,11 @@ func (c *Cache) Lookup(workspaceID, url string) string {
 // question, which the GC needs to map a set of live repo URLs onto the
 // directories it is about to consider evicting.
 func (c *Cache) BarePath(workspaceID, url string) string {
-	return filepath.Join(c.root, workspaceID, bareDirName(url))
+	path, err := repositoryCachePath(c.root, workspaceID, url)
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // lastUsedFile records the last time a task asked for a worktree from this
@@ -485,7 +514,11 @@ func MarkUsed(barePath string, logger *slog.Logger) {
 		return
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := os.WriteFile(filepath.Join(barePath, lastUsedFile), []byte(stamp), 0o644); err != nil && logger != nil {
+	path, err := joinUnder(barePath, lastUsedFile)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(path, []byte(stamp), 0o644); err != nil && logger != nil {
 		logger.Warn("repo cache: write last-used stamp failed", "repo", barePath, "error", err)
 	}
 }
@@ -499,7 +532,11 @@ func MarkUsed(barePath string, logger *slog.Logger) {
 // force a full re-clone of each. Callers must stamp an unknown repo and let it
 // age from now.
 func LastUsed(barePath string) (time.Time, bool) {
-	data, err := os.ReadFile(filepath.Join(barePath, lastUsedFile))
+	path, err := joinUnder(barePath, lastUsedFile)
+	if err != nil {
+		return time.Time{}, false
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -550,9 +587,9 @@ func (c *Cache) Fetch(barePath string) error {
 
 // bareDirName returns a filesystem-safe, collision-free directory name for
 // the bare clone of rawURL. The name is built from the host plus each
-// path segment, joined by '+'. '+' is disallowed in GitHub and GitLab
-// path segments, so two URLs produce the same name only if they point at
-// the same repository on the same host.
+// path segment, joined by '+'. Bytes outside the portable filename set,
+// including a literal '+', are percent-encoded before joining so segment
+// boundaries cannot collide with repository-name bytes.
 //
 // Examples:
 //
@@ -576,7 +613,7 @@ func bareDirName(rawURL string) string {
 	// this function exists to prevent. '%' is forbidden in valid hostnames
 	// (RFC 952 / RFC 1123), and in GitHub/GitLab path segments, so the
 	// encoded marker can never come from a legal input.
-	host = strings.ReplaceAll(host, ":", "%3A")
+	host = encodeCachePathSegment(host)
 
 	var parts []string
 	if host != "" {
@@ -584,7 +621,7 @@ func bareDirName(rawURL string) string {
 	}
 	for _, seg := range strings.Split(path, "/") {
 		if seg != "" {
-			parts = append(parts, seg)
+			parts = append(parts, encodeCachePathSegment(seg))
 		}
 	}
 
@@ -596,6 +633,25 @@ func bareDirName(rawURL string) string {
 		name = "repo.git"
 	}
 	return name
+}
+
+func encodeCachePathSegment(segment string) string {
+	var encoded strings.Builder
+	const hex = "0123456789ABCDEF"
+	for i := 0; i < len(segment); i++ {
+		b := segment[i]
+		if b >= 'a' && b <= 'z' ||
+			b >= 'A' && b <= 'Z' ||
+			b >= '0' && b <= '9' ||
+			b == '.' || b == '_' || b == '-' {
+			encoded.WriteByte(b)
+			continue
+		}
+		encoded.WriteByte('%')
+		encoded.WriteByte(hex[b>>4])
+		encoded.WriteByte(hex[b&0x0f])
+	}
+	return encoded.String()
 }
 
 // splitHostAndPath extracts the host and path-with-namespace from the
@@ -628,6 +684,36 @@ func isBareRepo(path string) bool {
 	return err == nil
 }
 
+const cacheOriginURLFile = ".multica_origin_url"
+
+func cachedRepoMatchesURL(barePath, repoURL string) bool {
+	path, err := joinUnder(barePath, cacheOriginURLFile)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	return err == nil && strings.TrimSpace(string(data)) == repoURL
+}
+
+func cachedRepoMatchesURLContext(ctx context.Context, barePath, repoURL string) bool {
+	if cachedRepoMatchesURL(barePath, repoURL) {
+		return true
+	}
+	out, err := runGitOutputContext(ctx, "-C", barePath, "config", "--get", "remote.origin.url")
+	if err != nil || strings.TrimSpace(string(out)) != repoURL {
+		return false
+	}
+	return recordCacheOriginURL(barePath, repoURL) == nil
+}
+
+func recordCacheOriginURL(barePath, repoURL string) error {
+	path, err := joinUnder(barePath, cacheOriginURLFile)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(repoURL+"\n"), 0o600)
+}
+
 // modernFetchRefspec is the remote-tracking refspec that keeps fetched heads
 // out of the bare repo's refs/heads/* namespace. That namespace is reserved
 // for per-task worktree branches created by `git worktree add -b ...`, and any
@@ -640,7 +726,10 @@ func gitCloneBare(url, dest string) error {
 }
 
 func gitCloneBareContext(ctx context.Context, url, dest string) error {
-	args := append(caCloneArgs(), "clone", "--bare", url, dest)
+	if err := validateRepositoryURL(url); err != nil {
+		return fmt.Errorf("invalid repository URL: %w", err)
+	}
+	args := append(caCloneArgs(), "clone", "--bare", "--", url, dest)
 	if out, err := runGitCombinedOutputContext(ctx, args...); err != nil {
 		// Clean up partial clone.
 		os.RemoveAll(dest)
@@ -658,6 +747,10 @@ func gitCloneBareContext(ctx context.Context, url, dest string) error {
 	if err := ensureRemoteTrackingLayoutContext(ctx, dest); err != nil {
 		os.RemoveAll(dest)
 		return fmt.Errorf("configure fetch refspec: %w", err)
+	}
+	if err := recordCacheOriginURL(dest, url); err != nil {
+		os.RemoveAll(dest)
+		return fmt.Errorf("record repository origin: %w", err)
 	}
 	return nil
 }
@@ -836,6 +929,9 @@ func (c *Cache) CreateWorktree(params WorktreeParams) (*WorktreeResult, error) {
 // lock is held, so a client that times out behind maintenance cannot leave a
 // late, unwanted checkout.
 func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams) (*WorktreeResult, error) {
+	if _, err := repositoryCachePath(c.root, params.WorkspaceID, params.RepoURL); err != nil {
+		return nil, fmt.Errorf("invalid repository checkout request: %w", err)
+	}
 	barePath := c.Lookup(params.WorkspaceID, params.RepoURL)
 	if barePath == "" {
 		return nil, fmt.Errorf("repo not found in cache: %s (workspace: %s)", params.RepoURL, params.WorkspaceID)
@@ -919,8 +1015,10 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
 
 	// Derive directory name from repo URL.
-	dirName := repoNameFromURL(params.RepoURL)
-	worktreePath := filepath.Join(params.WorkDir, dirName)
+	worktreePath, err := repositoryCheckoutPath(params.WorkDir, params.RepoURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository checkout path: %w", err)
+	}
 
 	// Once a workdir has moved to isolated metadata, keep using that safer
 	// shape even if a later task comes from an older CLI or a different runtime
@@ -940,13 +1038,11 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 			return nil, fmt.Errorf("create isolated checkout: %w", err)
 		}
 
-		for _, pattern := range agentGitExcludePatterns {
-			_ = excludeFromGitContext(ctx, worktreePath, pattern)
-		}
 		if err := isolateWorktreeIdentityContext(ctx, barePath, worktreePath); err != nil {
 			return nil, fmt.Errorf("isolate checkout Git identity: %w", err)
 		}
-		c.applyCoAuthoredBySettingContext(ctx, worktreePath, params)
+		excludeAgentFilesContext(ctx, barePath, worktreePath)
+		c.applyCoAuthoredBySettingContext(ctx, barePath, worktreePath, params)
 		if err := ctx.Err(); err != nil {
 			return nil, context.Cause(ctx)
 		}
@@ -958,25 +1054,25 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 	// If worktree already exists (reused environment from a prior task),
 	// reuse it instead of creating a new one.
 	if isGitWorktree(worktreePath) {
+		if err := validateLinkedWorktreeContext(ctx, barePath, worktreePath); err != nil {
+			return nil, fmt.Errorf("validate existing worktree: %w", err)
+		}
 		result, err := updateExistingCheckoutContext(ctx, worktreePath, branchName, baseRef, params.Fresh)
 		if err != nil {
 			return nil, fmt.Errorf("update existing worktree: %w", err)
 		}
 
-		for _, pattern := range agentGitExcludePatterns {
-			_ = excludeFromGitContext(ctx, worktreePath, pattern)
-		}
-
 		if err := isolateWorktreeIdentityContext(ctx, barePath, worktreePath); err != nil {
 			return nil, fmt.Errorf("isolate checkout Git identity: %w", err)
 		}
+		excludeAgentFilesContext(ctx, barePath, worktreePath)
 
 		// Reconcile the Co-authored-by hook and the workspace's recorded
 		// setting. The hook lives in the bare repo's shared hooks dir, so we
 		// must actively remove it when disabled — otherwise a previously
 		// installed hook keeps appending the trailer to every commit even
 		// after the user toggles the setting off.
-		c.applyCoAuthoredBySettingContext(ctx, worktreePath, params)
+		c.applyCoAuthoredBySettingContext(ctx, barePath, worktreePath, params)
 		if err := ctx.Err(); err != nil {
 			return nil, context.Cause(ctx)
 		}
@@ -993,18 +1089,15 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 	}
 
 	// Exclude agent context files from git tracking.
-	for _, pattern := range agentGitExcludePatterns {
-		_ = excludeFromGitContext(ctx, worktreePath, pattern)
-	}
-
 	if err := isolateWorktreeIdentityContext(ctx, barePath, worktreePath); err != nil {
 		return nil, fmt.Errorf("isolate checkout Git identity: %w", err)
 	}
+	excludeAgentFilesContext(ctx, barePath, worktreePath)
 
 	// Reconcile the Co-authored-by hook and the workspace's recorded setting.
 	// See the existing-worktree branch above for why removal is required when
 	// the setting is disabled.
-	c.applyCoAuthoredBySettingContext(ctx, worktreePath, params)
+	c.applyCoAuthoredBySettingContext(ctx, barePath, worktreePath, params)
 	if err := ctx.Err(); err != nil {
 		return nil, context.Cause(ctx)
 	}
@@ -1069,6 +1162,9 @@ func (c *Cache) createOrUpdateIsolatedCheckoutContext(ctx context.Context, bareP
 	}
 
 	if isIsolatedCheckoutContext(ctx, checkoutPath) {
+		if err := validateIsolatedCheckoutContext(ctx, checkoutPath); err != nil {
+			return nil, err
+		}
 		if err := setIsolatedCheckoutOriginContext(ctx, checkoutPath, repoURL); err != nil {
 			return nil, err
 		}
@@ -1110,6 +1206,9 @@ func (c *Cache) createOrUpdateIsolatedCheckoutContext(ctx context.Context, bareP
 	// out of the agent's reach and dropped by the next GC.
 	var carryBranch string
 	if isGitWorktree(checkoutPath) {
+		if err := validateLinkedWorktreeContext(ctx, barePath, checkoutPath); err != nil {
+			return nil, err
+		}
 		state, err := inspectCheckoutContext(ctx, checkoutPath)
 		if err != nil {
 			return nil, err
@@ -1195,7 +1294,7 @@ func localCloneArgs(goos, barePath, checkoutPath string) []string {
 	if goos == "windows" {
 		args = append(args, "--no-hardlinks")
 	}
-	return append(args, "--origin", isolatedCacheRemoteName, barePath, checkoutPath)
+	return append(args, "--origin", isolatedCacheRemoteName, "--", barePath, checkoutPath)
 }
 
 // createIsolatedCheckout seeds a new isolated checkout from the cache. A
@@ -1285,7 +1384,7 @@ func resolveCommit(repoPath, ref string) (string, error) {
 }
 
 func resolveCommitContext(ctx context.Context, repoPath, ref string) (string, error) {
-	out, err := runGitOutputContext(ctx, "-C", repoPath, "rev-parse", "--verify", ref+"^{commit}")
+	out, err := runGitOutputContext(ctx, "-C", repoPath, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve checkout base %q: %w", ref, err)
 	}
@@ -1307,6 +1406,29 @@ func isIsolatedCheckoutContext(ctx context.Context, path string) bool {
 	}
 	out, err := runGitOutputContext(ctx, "-C", path, "config", "--get", isolatedCheckoutConfigKey)
 	return err == nil && strings.TrimSpace(string(out)) == isolatedCheckoutConfigValue
+}
+
+func validateIsolatedCheckoutContext(ctx context.Context, checkoutPath string) error {
+	gitDir, err := joinUnder(checkoutPath, ".git")
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(gitDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("isolated checkout Git directory is invalid")
+	}
+	out, err := runGitOutputContext(ctx, "-C", checkoutPath, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return fmt.Errorf("resolve isolated checkout Git directory: %w", err)
+	}
+	resolvedGitDir, err := requirePathWithin(checkoutPath, strings.TrimSpace(string(out)), "isolated checkout Git directory")
+	if err != nil {
+		return err
+	}
+	if !sameResolvedPath(resolvedGitDir, gitDir) {
+		return fmt.Errorf("isolated checkout Git directory %s does not match %s", resolvedGitDir, gitDir)
+	}
+	return validateCheckoutRootContext(ctx, checkoutPath)
 }
 
 // partialCloneFilter is the object filter a blobless partial clone is created
@@ -1478,6 +1600,9 @@ func resolveBaseRefContext(ctx context.Context, barePath, requestedRef string) (
 	if ref == "" {
 		return getRemoteDefaultBranchContext(ctx, barePath), nil
 	}
+	if err := validateGitRef(ref); err != nil {
+		return "", fmt.Errorf("invalid requested ref %q: %w", ref, err)
+	}
 
 	// Prefer remote-tracking branches for human branch names. Then allow full
 	// local refs, tags, and raw commits that exist in the fetched bare cache.
@@ -1499,7 +1624,7 @@ func gitRefExists(repoPath, ref string) bool {
 }
 
 func gitRefExistsContext(ctx context.Context, repoPath, ref string) bool {
-	return runGitContext(ctx, "-C", repoPath, "rev-parse", "--verify", "--quiet", ref) == nil
+	return runGitContext(ctx, "-C", repoPath, "rev-parse", "--verify", "--quiet", "--end-of-options", ref) == nil
 }
 
 // createWorktree creates a git worktree at the given path with a new branch.
@@ -1868,7 +1993,15 @@ func (c *Cache) CoAuthoredByStatePath(workspaceID string) string {
 	if workspaceID == "" {
 		return ""
 	}
-	return filepath.Join(c.root, workspaceID, coAuthoredByStateFile)
+	wsDir, err := workspaceCacheDir(c.root, workspaceID)
+	if err != nil {
+		return ""
+	}
+	path, err := joinUnder(wsDir, coAuthoredByStateFile)
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // WriteCoAuthoredByState publishes the workspace's current setting to every
@@ -1880,9 +2013,16 @@ func (c *Cache) CoAuthoredByStatePath(workspaceID string) string {
 // The write is atomic (temp file + rename) so a hook running concurrently
 // reads either the old value or the new one, never a half-written file.
 func (c *Cache) WriteCoAuthoredByState(workspaceID string, enabled bool) error {
-	path := c.CoAuthoredByStatePath(workspaceID)
-	if path == "" {
+	if workspaceID == "" {
 		return nil
+	}
+	wsDir, err := workspaceCacheDir(c.root, workspaceID)
+	if err != nil {
+		return fmt.Errorf("invalid workspace ID: %w", err)
+	}
+	path, err := joinUnder(wsDir, coAuthoredByStateFile)
+	if err != nil {
+		return fmt.Errorf("resolve co-authored-by state path: %w", err)
 	}
 	value := coAuthoredByStateDisabled
 	if enabled {
@@ -1931,18 +2071,18 @@ func (c *Cache) WriteCoAuthoredByState(workspaceID string, enabled bool) error {
 // daemon published, falling back to the snapshot only when nothing has been
 // published yet (a cache driven without a daemon, or a state file removed under
 // us).
-func (c *Cache) applyCoAuthoredBySettingContext(ctx context.Context, worktreePath string, params WorktreeParams) {
+func (c *Cache) applyCoAuthoredBySettingContext(ctx context.Context, barePath, worktreePath string, params WorktreeParams) {
 	enabled := params.CoAuthoredByEnabled
 	if published, ok := c.readCoAuthoredByState(params.WorkspaceID); ok {
 		enabled = published
 	}
 	if enabled {
-		if err := installCoAuthoredByHookContext(ctx, worktreePath, c.CoAuthoredByStatePath(params.WorkspaceID)); err != nil {
+		if err := installCoAuthoredByHookContext(ctx, barePath, worktreePath, c.CoAuthoredByStatePath(params.WorkspaceID)); err != nil {
 			c.logger.Warn("repo checkout: install co-authored-by hook failed (non-fatal)", "error", err)
 		}
 		return
 	}
-	if err := removeCoAuthoredByHookContext(ctx, worktreePath); err != nil {
+	if err := removeCoAuthoredByHookContext(ctx, barePath, worktreePath); err != nil {
 		c.logger.Warn("repo checkout: remove co-authored-by hook failed (non-fatal)", "error", err)
 	}
 }
@@ -1986,7 +2126,10 @@ func (c *Cache) ReconcileCoAuthoredByHooks(workspaceID string, enabled bool) err
 	if workspaceID == "" {
 		return nil
 	}
-	wsDir := filepath.Join(c.root, workspaceID)
+	wsDir, err := workspaceCacheDir(c.root, workspaceID)
+	if err != nil {
+		return fmt.Errorf("invalid workspace ID: %w", err)
+	}
 	entries, err := os.ReadDir(wsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2023,7 +2166,10 @@ func (c *Cache) ReconcileCoAuthoredByHookInCheckout(checkoutPath, workspaceID st
 	if checkoutPath == "" || workspaceID == "" {
 		return nil
 	}
-	gitDir := filepath.Join(checkoutPath, ".git")
+	gitDir, err := joinUnder(checkoutPath, ".git")
+	if err != nil {
+		return fmt.Errorf("resolve checkout Git directory: %w", err)
+	}
 	info, err := os.Stat(gitDir)
 	if err != nil || !info.IsDir() {
 		return nil
@@ -2035,7 +2181,10 @@ func (c *Cache) ReconcileCoAuthoredByHookInCheckout(checkoutPath, workspaceID st
 // leaves a hook the daemon did not install alone, and never creates a hooks
 // directory it did not find.
 func (c *Cache) reconcileHookAt(hooksDir, workspaceID string, enabled bool) error {
-	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	hookPath, err := joinUnder(hooksDir, "prepare-commit-msg")
+	if err != nil {
+		return fmt.Errorf("resolve prepare-commit-msg hook: %w", err)
+	}
 	current, err := os.ReadFile(hookPath)
 	switch {
 	case err == nil && !isDaemonInstalledHook(current):
@@ -2133,26 +2282,24 @@ func shellSingleQuoted(s string) string {
 //
 // statePath is the file the hook re-reads on every commit to decide whether
 // the trailer is still wanted; pass "" to install an ungated hook.
-func installCoAuthoredByHook(worktreePath, statePath string) error {
-	return installCoAuthoredByHookContext(context.Background(), worktreePath, statePath)
-}
-
-func installCoAuthoredByHookContext(ctx context.Context, worktreePath, statePath string) error {
-	out, err := runGitOutputContext(ctx, "-C", worktreePath, "rev-parse", "--git-common-dir")
+func installCoAuthoredByHookContext(ctx context.Context, barePath, worktreePath, statePath string) error {
+	commonDir, err := managedGitPathContext(ctx, barePath, worktreePath, "--git-common-dir")
 	if err != nil {
 		return fmt.Errorf("resolve git common dir: %w", err)
 	}
-	commonDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreePath, commonDir)
-	}
 
-	hooksDir := filepath.Join(commonDir, "hooks")
+	hooksDir, err := joinUnder(commonDir, "hooks")
+	if err != nil {
+		return fmt.Errorf("resolve hooks dir: %w", err)
+	}
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return fmt.Errorf("create hooks dir: %w", err)
 	}
 
-	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	hookPath, err := joinUnder(hooksDir, "prepare-commit-msg")
+	if err != nil {
+		return fmt.Errorf("resolve prepare-commit-msg hook: %w", err)
+	}
 	if err := writeHookFile(hookPath, prepareCommitMsgHook(statePath)); err != nil {
 		return fmt.Errorf("write prepare-commit-msg hook: %w", err)
 	}
@@ -2209,21 +2356,20 @@ func isDaemonInstalledHook(contents []byte) bool {
 // content), so a user-installed prepare-commit-msg hook is never touched.
 // Returns nil when no hook is present or when an unrelated hook occupies
 // the path.
-func removeCoAuthoredByHook(worktreePath string) error {
-	return removeCoAuthoredByHookContext(context.Background(), worktreePath)
-}
-
-func removeCoAuthoredByHookContext(ctx context.Context, worktreePath string) error {
-	out, err := runGitOutputContext(ctx, "-C", worktreePath, "rev-parse", "--git-common-dir")
+func removeCoAuthoredByHookContext(ctx context.Context, barePath, worktreePath string) error {
+	commonDir, err := managedGitPathContext(ctx, barePath, worktreePath, "--git-common-dir")
 	if err != nil {
 		return fmt.Errorf("resolve git common dir: %w", err)
 	}
-	commonDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreePath, commonDir)
-	}
 
-	hookPath := filepath.Join(commonDir, "hooks", "prepare-commit-msg")
+	hooksDir, err := joinUnder(commonDir, "hooks")
+	if err != nil {
+		return fmt.Errorf("resolve hooks dir: %w", err)
+	}
+	hookPath, err := joinUnder(hooksDir, "prepare-commit-msg")
+	if err != nil {
+		return fmt.Errorf("resolve prepare-commit-msg hook: %w", err)
+	}
 	contents, err := os.ReadFile(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2241,43 +2387,79 @@ func removeCoAuthoredByHookContext(ctx context.Context, worktreePath string) err
 	return nil
 }
 
-// excludeFromGit adds a pattern to the worktree's .git/info/exclude file.
-func excludeFromGit(worktreePath, pattern string) error {
-	return excludeFromGitContext(context.Background(), worktreePath, pattern)
-}
-
-func excludeFromGitContext(ctx context.Context, worktreePath, pattern string) error {
-	out, err := runGitOutputContext(ctx, "-C", worktreePath, "rev-parse", "--git-dir")
+func excludeAgentFilesContext(ctx context.Context, barePath, worktreePath string) {
+	gitDir, err := managedGitPathContext(ctx, barePath, worktreePath, "--git-dir")
 	if err != nil {
-		return fmt.Errorf("resolve git dir: %w", err)
+		return
 	}
 
-	gitDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(worktreePath, gitDir)
+	infoDir, err := joinUnder(gitDir, "info")
+	if err != nil {
+		return
 	}
-
-	excludePath := filepath.Join(gitDir, "info", "exclude")
+	excludePath, err := joinUnder(infoDir, "exclude")
+	if err != nil {
+		return
+	}
 
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
-		return fmt.Errorf("create info dir: %w", err)
+		return
 	}
 
 	existing, _ := os.ReadFile(excludePath)
-	if strings.Contains(string(existing), pattern) {
-		return nil
+	var additions strings.Builder
+	for _, pattern := range agentGitExcludePatterns {
+		if !strings.Contains(string(existing), pattern) {
+			fmt.Fprintf(&additions, "\n%s\n", pattern)
+		}
+	}
+	if additions.Len() == 0 {
+		return
 	}
 
 	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("open exclude file: %w", err)
+		return
 	}
 	defer f.Close()
 
-	if _, err := fmt.Fprintf(f, "\n%s\n", pattern); err != nil {
-		return fmt.Errorf("write exclude pattern: %w", err)
+	_, _ = f.WriteString(additions.String())
+}
+
+func managedGitPathContext(ctx context.Context, barePath, worktreePath, selector string) (string, error) {
+	out, err := runGitOutputContext(ctx, "-C", worktreePath, "rev-parse", selector)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	candidate := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(candidate) {
+		if !filepath.IsLocal(candidate) {
+			return "", fmt.Errorf("Git path %q is not local", candidate)
+		}
+		candidate, err = joinUnder(worktreePath, candidate)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	gitMarker, err := joinUnder(worktreePath, ".git")
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(gitMarker)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return requirePathWithin(worktreePath, candidate, "isolated checkout Git path")
+	}
+	if selector == "--git-common-dir" {
+		if !sameResolvedPath(candidate, barePath) {
+			return "", fmt.Errorf("linked worktree common dir %s does not match cache %s", candidate, barePath)
+		}
+		return filepath.Clean(candidate), nil
+	}
+	return requirePathWithin(barePath, candidate, "linked worktree Git path")
 }
 
 // repoNameFromURL extracts a short directory name from a git remote URL.
@@ -2331,7 +2513,11 @@ const taskKeyLen = 12
 // front gave two concurrently created tasks the same branch name (#7326). The
 // tail is random.
 func taskKey(uuid string) string {
-	s := strings.ReplaceAll(uuid, "-", "")
+	s := strings.ToLower(uuid)
+	s = nonAlphanumeric.ReplaceAllString(s, "")
+	if s == "" {
+		s = "task"
+	}
 	if len(s) > taskKeyLen {
 		return s[len(s)-taskKeyLen:]
 	}

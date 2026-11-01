@@ -340,14 +340,18 @@ func isIgnoredLocalSkillEntry(name string) bool {
 }
 
 func normalizeLocalSkillKey(key string) (string, error) {
-	if strings.TrimSpace(key) == "" {
+	key = strings.TrimSpace(key)
+	if key == "" {
 		return "", fmt.Errorf("skill key is required")
 	}
-	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimSpace(key)))
-	if cleaned == "." || filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
+	if !skill.IsSafeFilePath(key) {
 		return "", fmt.Errorf("invalid skill key")
 	}
-	return filepath.ToSlash(cleaned), nil
+	local := filepath.FromSlash(key)
+	if !filepath.IsLocal(local) {
+		return "", fmt.Errorf("invalid skill key")
+	}
+	return key, nil
 }
 
 func relativizeHomePath(path string) string {
@@ -693,7 +697,14 @@ func loadRuntimeLocalSkillBundle(provider, skillKey string) (*runtimeLocalSkillB
 			}
 			rootKey = strings.TrimPrefix(key, root.keyPrefix)
 		}
-		skillDir := filepath.Join(root.path, filepath.FromSlash(rootKey))
+		rootKey, err = normalizeLocalSkillKey(rootKey)
+		if err != nil {
+			return nil, true, err
+		}
+		skillDir, err := joinLocalSkillPath(root.path, rootKey)
+		if err != nil {
+			return nil, true, err
+		}
 		info, err := os.Stat(skillDir)
 		if err != nil {
 			// IsNotExist => this root simply lacks the skill, try the next.
@@ -755,4 +766,17 @@ func loadRuntimeLocalSkillBundle(provider, skillKey string) (*runtimeLocalSkillB
 	}
 
 	return nil, true, fmt.Errorf("local skill not found")
+}
+
+func joinLocalSkillPath(root, key string) (string, error) {
+	relative := filepath.FromSlash(key)
+	if !filepath.IsLocal(relative) {
+		return "", fmt.Errorf("invalid skill key")
+	}
+	skillDir := filepath.Join(root, relative)
+	rel, err := filepath.Rel(root, skillDir)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("skill path escapes runtime root")
+	}
+	return skillDir, nil
 }
