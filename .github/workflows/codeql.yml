@@ -1,0 +1,73 @@
+name: CodeQL
+
+# Advanced CodeQL setup (default setup is disabled for this repository).
+# While GitHub-hosted runners are unavailable, refresh code scanning by
+# running the CodeQL CLI locally against main and uploading the SARIF with
+# the same categories used here (/language:actions, /language:go,
+# /language:javascript-typescript):
+#   codeql database create <db> --language=go --command='bash -c "cd server && go build ./..."'
+#   codeql database analyze <db> codeql/go-queries:codeql-suites/go-code-scanning.qls \
+#     --format=sarif-latest --output=go.sarif --sarif-category=/language:go
+#   gh api -X POST repos/{owner}/{repo}/code-scanning/sarifs (commit_sha, ref, gzip+base64 sarif)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "~1.27.3"
+          cache-dependency-path: server/go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build Go
+        if: matrix.build-mode == 'manual'
+        working-directory: server
+        run: go build ./...
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

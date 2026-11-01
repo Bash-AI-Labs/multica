@@ -41,6 +41,9 @@ on:
       - "turbo.json"
       - ".github/workflows/mobile-verify.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
