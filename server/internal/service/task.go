@@ -4081,7 +4081,7 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		uniqueIDs = append(uniqueIDs, rid)
 	}
 
-	claimed := make([]db.AgentTaskQueue, 0, maxTasks)
+	claimed := make([]db.AgentTaskQueue, 0)
 
 	// 1. Promote due deferred tasks across the whole set (promote-first, like
 	// the singular path). Replay the per-row side effects the singular service

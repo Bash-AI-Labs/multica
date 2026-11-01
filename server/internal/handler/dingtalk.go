@@ -317,12 +317,12 @@ func (h *Handler) listDingTalkGroups(
 			pageLimit = parsed
 		}
 		if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
-			parsed, err := strconv.Atoi(raw)
+			parsed, err := strconv.ParseInt(raw, 10, 32)
 			if err != nil || parsed < 0 {
 				writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
 				return
 			}
-			pageOffset = parsed
+			pageOffset = int(parsed)
 		}
 	}
 	mayListPresence := true

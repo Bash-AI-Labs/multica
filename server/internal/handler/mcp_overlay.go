@@ -75,7 +75,7 @@ func mergeMCPOverlay(agentMcpConfig, overlay json.RawMessage) (json.RawMessage, 
 		return passthroughAgentMcpConfig(agentMcpConfig), fmt.Errorf("merge mcp overlay: overlay mcpServers: %w", err)
 	}
 
-	merged := make(map[string]json.RawMessage, len(aServers)+len(oServers))
+	merged := make(map[string]json.RawMessage)
 	for k, v := range aServers {
 		merged[k] = v
 	}
@@ -87,7 +87,7 @@ func mergeMCPOverlay(agentMcpConfig, overlay json.RawMessage) (json.RawMessage, 
 	// Rebuild: keep any non-mcpServers top-level keys from the agent config,
 	// then write the merged mcpServers map back. This is the only place we
 	// touch top-level keys; everything else is left alone.
-	out := make(map[string]json.RawMessage, len(aCfg)+1)
+	out := make(map[string]json.RawMessage)
 	for k, v := range aCfg {
 		if k == "mcpServers" {
 			continue

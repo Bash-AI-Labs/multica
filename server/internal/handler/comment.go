@@ -501,11 +501,12 @@ func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
 
 	recentN := 0
 	if recentStr != "" {
-		n, err := strconv.Atoi(recentStr)
-		if err != nil || n <= 0 {
+		parsed, err := strconv.ParseInt(recentStr, 10, 32)
+		if err != nil || parsed <= 0 {
 			writeError(w, http.StatusBadRequest, "invalid recent parameter; expected positive integer")
 			return
 		}
+		n := int(parsed)
 		if n > commentHardCap {
 			n = commentHardCap
 		}
@@ -519,11 +520,12 @@ func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
 	threadTail := -1
 	threadTailSet := false
 	if tailStr != "" {
-		n, err := strconv.Atoi(tailStr)
-		if err != nil || n < 0 {
+		parsed, err := strconv.ParseInt(tailStr, 10, 32)
+		if err != nil || parsed < 0 {
 			writeError(w, http.StatusBadRequest, "invalid tail parameter; expected non-negative integer")
 			return
 		}
+		n := int(parsed)
 		if n > commentHardCap {
 			n = commentHardCap
 		}

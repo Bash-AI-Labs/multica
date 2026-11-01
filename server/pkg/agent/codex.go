@@ -772,7 +772,7 @@ func normalizeCodexMcpServerConfig(server map[string]any) map[string]any {
 		return normalized
 	}
 
-	normalized := make(map[string]any, len(server)+1)
+	normalized := make(map[string]any)
 	for k, v := range server {
 		switch {
 		case isMulticaMcpSelectorKey(k):

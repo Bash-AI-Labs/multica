@@ -6064,7 +6064,7 @@ func (h *Handler) ListTaskMessages(w http.ResponseWriter, r *http.Request) {
 		err      error
 	)
 	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
-		sinceSeq, parseErr := strconv.Atoi(sinceStr)
+		sinceSeq, parseErr := strconv.ParseInt(sinceStr, 10, 32)
 		if parseErr != nil {
 			writeError(w, http.StatusBadRequest, "invalid since parameter")
 			return
@@ -6471,7 +6471,7 @@ func (h *Handler) ListTaskMessagesByUser(w http.ResponseWriter, r *http.Request)
 		queryErr error
 	)
 	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
-		sinceSeq, parseErr := strconv.Atoi(sinceStr)
+		sinceSeq, parseErr := strconv.ParseInt(sinceStr, 10, 32)
 		if parseErr != nil {
 			writeError(w, http.StatusBadRequest, "invalid since parameter")
 			return

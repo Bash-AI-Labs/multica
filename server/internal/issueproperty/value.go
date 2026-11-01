@@ -162,7 +162,7 @@ func optionOrder(config propertyConfig) map[string]int {
 
 func optionsHint(config propertyConfig) string {
 	visible := config.Options[:min(len(config.Options), maxOptionsHint)]
-	parts := make([]string, 0, len(visible)+1)
+	parts := make([]string, 0, maxOptionsHint+1)
 	for _, option := range visible {
 		parts = append(parts, fmt.Sprintf("%s (%s)", option.ID, option.Name))
 	}

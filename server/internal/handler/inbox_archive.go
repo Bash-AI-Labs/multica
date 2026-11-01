@@ -141,7 +141,7 @@ func (h *Handler) ListArchivedInboxPage(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to load archived inbox page")
 		return
 	}
-	resp := archivedInboxPageResponse{Items: make([]InboxItemResponse, 0, limit), HasMore: len(rows) > limit}
+	resp := archivedInboxPageResponse{Items: make([]InboxItemResponse, 0), HasMore: len(rows) > limit}
 	if resp.HasMore {
 		rows = rows[:limit]
 	}

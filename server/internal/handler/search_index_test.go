@@ -162,6 +162,16 @@ func TestSearchIndexBootstrapThenCatchUp(t *testing.T) {
 	}
 }
 
+func TestSearchIndexSnapshotRejectsOutOfRangeAfterNumber(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	wsID := searchIndexWorkspace(t, "SIO")
+	testutil.Call(t, testHandler.GetSearchIndexSnapshot,
+		searchIndexRequest(http.MethodGet, "/api/search-index/snapshot?after_number=2147483648", wsID, nil)).
+		Want(http.StatusBadRequest)
+}
+
 func TestSearchIndexChangesPagesThroughKeyset(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
