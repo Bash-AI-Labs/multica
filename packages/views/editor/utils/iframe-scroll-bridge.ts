@@ -177,7 +177,10 @@ export function buildScrollBridge(token: string): string {
 
 /** Exposed for tests so they can evaluate the inner script in jsdom. */
 export function __scrollBridgeInnerScript__(token: string): string {
-  return buildScript(token)
-    .replace(/^<script>/, "")
-    .replace(/<\/script>\s*$/, "");
+  const script = buildScript(token);
+  const open = "<script>";
+  const close = "</script>";
+  return script.startsWith(open) && script.endsWith(close)
+    ? script.slice(open.length, -close.length)
+    : script;
 }

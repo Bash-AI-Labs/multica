@@ -22,6 +22,8 @@ import type { AgentDraft } from "./draft";
  * update" rather than breaking the conversation.
  */
 const BUILDER_INPUT_PREFIX = "MULTICA_AGENT_BUILDER_INPUT\n";
+const BUILDER_DRAFT_OPEN = "<agent_draft>";
+const BUILDER_DRAFT_CLOSE = "</agent_draft>";
 
 export interface BuilderDraftPayload {
   name?: unknown;
@@ -42,13 +44,23 @@ export function parseBuilderDraft(
   content: string,
   { completed = false }: { completed?: boolean } = {},
 ): BuilderDraftPayload | null {
-  const match = content.match(/<agent_draft>([\s\S]*?)<\/agent_draft>/);
-  if (!match?.[1]) {
+  const open = content.indexOf(BUILDER_DRAFT_OPEN);
+  const payloadStart = open === -1 ? -1 : open + BUILDER_DRAFT_OPEN.length;
+  const close =
+    payloadStart === -1
+      ? -1
+      : content.indexOf(BUILDER_DRAFT_CLOSE, payloadStart);
+  const payload =
+    payloadStart === -1 || close === -1
+      ? ""
+      : content.slice(payloadStart, close);
+
+  if (!payload) {
     // Completed CLI replies can omit the closing tag and include literal
     // string control characters. Apply the same repair as closed blocks,
     // but never recover a live stream or truncate trailing text.
-    if (!completed || content.includes("</agent_draft>")) return null;
-    const parts = content.split("<agent_draft>");
+    if (!completed || content.includes(BUILDER_DRAFT_CLOSE)) return null;
+    const parts = content.split(BUILDER_DRAFT_OPEN);
     if (parts.length !== 2 || !parts[1]) return null;
     try {
       const value = JSON.parse(escapeJsonStringControlCharacters(parts[1]));
@@ -58,7 +70,7 @@ export function parseBuilderDraft(
     }
   }
   try {
-    const value = JSON.parse(match[1]);
+    const value = JSON.parse(payload);
     return isBuilderDraftPayload(value) ? value : null;
   } catch {
     // Some CLI-backed models emit literal newlines in the Markdown
@@ -66,7 +78,7 @@ export function parseBuilderDraft(
     // control characters that occur inside strings; object structure and all
     // other syntax still have to pass JSON.parse.
     try {
-      const value = JSON.parse(escapeJsonStringControlCharacters(match[1]));
+      const value = JSON.parse(escapeJsonStringControlCharacters(payload));
       return isBuilderDraftPayload(value) ? value : null;
     } catch {
       return null;
@@ -119,20 +131,43 @@ function escapeJsonStringControlCharacters(value: string): string {
  * is machinery — it drives the configuration form — and the form is where its
  * effect is already visible, so the transcript keeps only the prose.
  *
- * Two patterns, not one. The closed form is what history holds. The unclosed
+ * Two forms are handled. The closed form is what history holds. The unclosed
  * one is what streaming produces: the reply arrives token by token, so for the
  * seconds it takes to emit the JSON there is an opening tag and no closing tag,
- * which the closed-form pattern cannot match — the raw payload used to scroll
- * past the reader on every single turn.
+ * and the raw payload must not scroll past the reader on every single turn.
  *
- * The leading `\s*` takes the whitespace the model left between its prose and
- * the block, so removing it does not strand a blank line.
+ * Whitespace immediately before either form is removed with it so the model
+ * cannot strand a blank line between its prose and the hidden payload.
  */
 export function stripBuilderDraft(content: string): string {
-  return content
-    .replace(/\s*<agent_draft>[\s\S]*?<\/agent_draft>/g, "")
-    .replace(/\s*<agent_draft>[\s\S]*$/, "")
-    .trim();
+  const visible: string[] = [];
+  let cursor = 0;
+
+  for (;;) {
+    const open = content.indexOf(BUILDER_DRAFT_OPEN, cursor);
+    if (open === -1) {
+      visible.push(content.slice(cursor));
+      break;
+    }
+
+    let visibleEnd = open;
+    while (
+      visibleEnd > cursor &&
+      content[visibleEnd - 1]?.trim() === ""
+    ) {
+      visibleEnd--;
+    }
+    visible.push(content.slice(cursor, visibleEnd));
+
+    const close = content.indexOf(
+      BUILDER_DRAFT_CLOSE,
+      open + BUILDER_DRAFT_OPEN.length,
+    );
+    if (close === -1) break;
+    cursor = close + BUILDER_DRAFT_CLOSE.length;
+  }
+
+  return visible.join("").trim();
 }
 
 export function encodeBuilderInput(

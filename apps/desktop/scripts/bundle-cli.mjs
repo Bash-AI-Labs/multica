@@ -15,7 +15,7 @@
 
 import { access, chmod, copyFile, mkdir, rm } from "node:fs/promises";
 import { constants } from "node:fs";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveVersion } from "./package.mjs";
@@ -86,7 +86,7 @@ function git(...args) {
 
 function hasGo() {
   try {
-    execSync("go version", { stdio: "pipe" });
+    execFileSync("go", ["version"], { stdio: "pipe" });
     return true;
   } catch {
     return false;
@@ -160,7 +160,7 @@ await chmod(destBinary, 0o755);
 // (which itself may be unsigned in dev) spawns the child.
 if (process.platform === "darwin") {
   try {
-    execSync(`codesign -s - --force ${JSON.stringify(destBinary)}`, {
+    execFileSync("codesign", ["-s", "-", "--force", destBinary], {
       stdio: "pipe",
     });
   } catch {

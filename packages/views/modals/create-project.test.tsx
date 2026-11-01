@@ -10,6 +10,18 @@ const apiRepoUrl = "https://github.com/multica-ai/api";
 const apiRepoDescription = "API and daemon runtime";
 const webRepoUrl = "https://github.com/multica-ai/web";
 
+function repositoryLabel(url: string): string {
+  return new URL(url).pathname.slice(1);
+}
+
+function getRepositoryButton(url: string): HTMLButtonElement {
+  const button = screen.getByText(repositoryLabel(url)).closest("button");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`repository button not found for ${url}`);
+  }
+  return button;
+}
+
 vi.mock("@tanstack/react-query", () => ({
   useQuery: () => ({ data: [] }),
   // The modal now reads the runtime list to gate worktree mode, and
@@ -229,9 +241,7 @@ describe("CreateProjectModal", () => {
     expect(screen.getByText(apiRepoDescription)).toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText(/project title/i), "API delivery");
-    await user.click(
-      screen.getByRole("button", { name: (name) => name.includes(apiRepoUrl) }),
-    );
+    await user.click(getRepositoryButton(apiRepoUrl));
     await user.click(screen.getByRole("button", { name: /^create project$/i }));
 
     expect(createProjectMock).toHaveBeenCalledTimes(1);
@@ -325,9 +335,7 @@ describe("CreateProjectModal", () => {
     renderWithI18n(<CreateProjectModal onClose={vi.fn()} />);
 
     await user.type(screen.getByPlaceholderText(/project title/i), "Bad branch");
-    await user.click(
-      screen.getByRole("button", { name: (name) => name.includes(apiRepoUrl) }),
-    );
+    await user.click(getRepositoryButton(apiRepoUrl));
 
     // The per-repo branch editor, reached from the selected-repo row.
     await user.click(screen.getByRole("button", { name: /default branch/i }));
@@ -353,9 +361,7 @@ describe("CreateProjectModal", () => {
     renderWithI18n(<CreateProjectModal onClose={vi.fn()} />);
 
     await user.type(screen.getByPlaceholderText(/project title/i), "Bad branch");
-    await user.click(
-      screen.getByRole("button", { name: (name) => name.includes(apiRepoUrl) }),
-    );
+    await user.click(getRepositoryButton(apiRepoUrl));
     await user.click(screen.getByRole("button", { name: /default branch/i }));
     await user.type(
       screen.getByLabelText(/starting branch/i),
@@ -411,15 +417,9 @@ describe("CreateProjectModal", () => {
 
     await user.type(repoSearchInput, "api");
 
-    expect(
-      screen.getByRole("button", { name: (name) => name.includes(apiRepoUrl) }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: (name) => name.includes(webRepoUrl) }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: (name) => name.includes(longRepoUrl) }),
-    ).not.toBeInTheDocument();
+    expect(getRepositoryButton(apiRepoUrl)).toBeInTheDocument();
+    expect(screen.queryByText(repositoryLabel(webRepoUrl))).not.toBeInTheDocument();
+    expect(screen.queryByText(repositoryLabel(longRepoUrl))).not.toBeInTheDocument();
 
     await user.clear(repoSearchInput);
     await user.type(repoSearchInput, "no-match");

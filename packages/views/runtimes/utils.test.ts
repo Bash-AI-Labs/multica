@@ -1350,6 +1350,17 @@ describe("isModelPriced", () => {
     // as unmapped because OpenAI hasn't published its rate.
     expect(isModelPriced("gpt-5.5-mini")).toBe(false);
   });
+
+  it("normalizes adversarial model suffixes in linear time", () => {
+    const models = [
+      `claude-opus-4-8[${"[".repeat(20_000)}]`,
+      `us.anthropic.claude-sonnet-5-v${"0".repeat(20_000)}:`,
+      `unknown-model${"[".repeat(20_000)}]`,
+    ];
+    const started = performance.now();
+    expect(models.map((model) => isModelPriced(model, "cursor"))).toHaveLength(3);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("collectUnmappedModels", () => {

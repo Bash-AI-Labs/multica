@@ -32,6 +32,14 @@ describe("withLocationBridge", () => {
     const out = withLocationBridge("<p>hi</p>", "?x=</script><script>alert(1)</script>");
     expect(out.match(/<\/script>/g)).toHaveLength(1);
   });
+
+  it("scans adversarial leading comments in linear time", () => {
+    const html = `${"<!--x-->".repeat(10_000)}<!doctype html><p>hi</p>`;
+    const started = performance.now();
+    const out = withLocationBridge(html, "");
+    expect(out).toContain("<!doctype html><script>");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("normalizeHtmlPreviewAddress", () => {

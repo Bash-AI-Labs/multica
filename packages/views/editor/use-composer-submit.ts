@@ -89,7 +89,7 @@ export interface ComposerSubmit {
   submit: () => Promise<void>;
 }
 
-const defaultNormalize = (raw: string) => raw.replace(/(\n\s*)+$/, "").trim();
+export const normalizeComposerMarkdown = (raw: string) => raw.trim();
 
 export function useComposerSubmit(opts: ComposerSubmitOptions): ComposerSubmit {
   const [submitting, setSubmitting] = useState(false);
@@ -149,7 +149,7 @@ export function useComposerSubmit(opts: ComposerSubmitOptions): ComposerSubmit {
   const submit = useCallback(async () => {
     const o = optsRef.current;
     const raw = o.editorRef.current?.getMarkdown() ?? "";
-    const content = (o.normalize ?? defaultNormalize)(raw);
+    const content = (o.normalize ?? normalizeComposerMarkdown)(raw);
     if (!content || inFlight.current) return;
     // Submit-time upload re-check: the disabled button is a frame behind, and
     // Cmd+Enter / Enter-on-title bypass the button entirely.

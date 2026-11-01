@@ -47,6 +47,29 @@ export function isIssueIdentifier(value: string): boolean {
   return ISSUE_IDENTIFIER_PATTERN.test(value)
 }
 
+function hasIssueIdentifierShape(text: string): boolean {
+  let hasUppercase = false
+  for (let i = 0; i < text.length; i++) {
+    const character = text[i]!
+    const isUppercase = character >= 'A' && character <= 'Z'
+    const isDigit = character >= '0' && character <= '9'
+    if (isUppercase) {
+      hasUppercase = true
+    } else if (isDigit) {
+      continue
+    } else if (character === '-') {
+      const next = text[i + 1]
+      if (hasUppercase && next !== undefined && next >= '0' && next <= '9') {
+        return true
+      }
+      hasUppercase = false
+    } else {
+      hasUppercase = false
+    }
+  }
+  return false
+}
+
 /**
  * Rewrite bare issue identifiers into canonical `mention://issue/<identifier>`
  * markdown links. Runs BEFORE `preprocessLinks`/`preprocessFileCards` so those
@@ -60,7 +83,7 @@ export function isIssueIdentifier(value: string): boolean {
  */
 export function preprocessIssueIdentifiers(text: string): string {
   // Cheap early-out: no `<UPPER>…-<DIGIT>` shape at all.
-  if (!/[A-Z][A-Z0-9]*-\d/.test(text)) return text
+  if (!hasIssueIdentifierShape(text)) return text
 
   const codeRanges = findCodeRanges(text)
   const linkRanges = findMarkdownLinkRanges(text)

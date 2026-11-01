@@ -116,6 +116,17 @@ describe("splitGithubUrlRef", () => {
       ref: "dev",
     });
   });
+
+  it("strips an adversarial trailing-slash run in linear time", () => {
+    const started = performance.now();
+    expect(
+      splitGithubUrlRef(`https://github.com/o/r/tree/main${"/".repeat(100_000)}`),
+    ).toEqual({
+      url: "https://github.com/o/r",
+      ref: "main",
+    });
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("looksLikeCommitSha", () => {

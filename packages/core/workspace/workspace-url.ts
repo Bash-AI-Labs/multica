@@ -22,10 +22,13 @@ export function workspaceUrlHost(
   } catch {
     // `daemon_app_url` may arrive without a scheme; treat it as a bare host
     // and strip any path/query/fragment so only the authority remains.
-    const bare = trimmed
-      .replace(/^.*?:\/\//, "")
-      .replace(/[/?#].*$/, "")
-      .trim();
+    const scheme = trimmed.indexOf("://");
+    const authorityStart = scheme === -1 ? 0 : scheme + 3;
+    const pathStart = ["/", "?", "#"]
+      .map((separator) => trimmed.indexOf(separator, authorityStart))
+      .filter((index) => index !== -1)
+      .reduce((first, index) => Math.min(first, index), trimmed.length);
+    const bare = trimmed.slice(authorityStart, pathStart).trim();
     return bare || BRAND_WORKSPACE_HOST;
   }
 }

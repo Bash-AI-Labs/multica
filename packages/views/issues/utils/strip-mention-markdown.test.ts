@@ -60,4 +60,11 @@ describe("stripMentionMarkdown", () => {
   it("handles empty string", () => {
     expect(stripMentionMarkdown("")).toBe("");
   });
+
+  it("handles adversarial escaped labels in linear time", () => {
+    const input = `[@${"\\\\".repeat(50_000)}](mention://agent/id)`;
+    const started = performance.now();
+    expect(stripMentionMarkdown(input)).toBe(`@${"\\\\".repeat(50_000)}`);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });

@@ -88,6 +88,13 @@ describe("preprocessIssueIdentifiers", () => {
     const input = "plain text with no identifiers";
     expect(preprocessIssueIdentifiers(input)).toBe(input);
   });
+
+  it("rejects an adversarial uppercase run in linear time", () => {
+    const input = "A".repeat(100_000);
+    const started = performance.now();
+    expect(preprocessIssueIdentifiers(input)).toBe(input);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("isIssueIdentifier", () => {

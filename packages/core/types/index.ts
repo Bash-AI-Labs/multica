@@ -152,7 +152,6 @@ export type {
 } from "./quick-action";
 export {
   QUICK_ACTION_SIDEBAR_LIMIT,
-  QUICK_ACTION_TEMPLATE_TOKEN_RE,
   findQuickActionTemplateToken,
 } from "./quick-action";
 export type {
