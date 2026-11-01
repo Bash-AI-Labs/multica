@@ -2016,3 +2016,77 @@ func TestServeLocalUpload_NonLocalStorage404(t *testing.T) {
 		t.Fatalf("status = %d, want 404", w.Code)
 	}
 }
+
+// TestLocalUploadRoute_RequiresSignatureOrMember covers who may read
+// /uploads/*. The app is reachable from the public internet, so only a
+// Multica-signed URL or a signed-in member of the key's workspace may read.
+func TestLocalUploadRoute_RequiresSignatureOrMember(t *testing.T) {
+	dir := t.TempDir()
+	foreignWorkspaceID := "00000000-0000-0000-0000-000000000099"
+	memberKey := "workspaces/" + testWorkspaceID + "/member.png"
+	foreignKey := "workspaces/" + foreignWorkspaceID + "/foreign.png"
+	userKey := "users/" + testUserID + "/avatar.png"
+	for _, key := range []string{memberKey, foreignKey, userKey} {
+		full := filepath.Join(dir, filepath.FromSlash(key))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte("img"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+	t.Setenv("LOCAL_UPLOAD_DIR", dir)
+	t.Setenv("LOCAL_UPLOAD_BASE_URL", "")
+	t.Setenv("MEDIA_SIGNING_SECRET", "test-media-secret")
+	local := storage.NewLocalStorageFromEnv()
+	origStorage := testHandler.Storage
+	testHandler.Storage = local
+	defer func() { testHandler.Storage = origStorage }()
+
+	// Stands in for middleware.Auth: rejects anonymous requests and stamps
+	// X-User-ID from the test identity.
+	requireAuth := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userID := r.Header.Get("X-Test-User")
+			if userID == "" {
+				http.Error(w, `{"error":"missing authorization"}`, http.StatusUnauthorized)
+				return
+			}
+			r.Header.Set("X-User-ID", userID)
+			next.ServeHTTP(w, r)
+		})
+	}
+	route := testHandler.LocalUploadRoute(requireAuth)
+	member := map[string]string{"X-Test-User": testUserID}
+
+	tests := []struct {
+		name    string
+		target  string
+		headers map[string]string
+		want    int
+	}{
+		{"anonymous unsigned", "/uploads/" + memberKey, nil, http.StatusUnauthorized},
+		{"anonymous signed", local.ObjectURL(foreignKey), nil, http.StatusOK},
+		{"anonymous bad signature", "/uploads/" + memberKey + "?sig=deadbeef", nil, http.StatusUnauthorized},
+		{"member unsigned", "/uploads/" + memberKey, member, http.StatusOK},
+		{"non-member unsigned", "/uploads/" + foreignKey, member, http.StatusForbidden},
+		{"signed-in user key", "/uploads/" + userKey, member, http.StatusOK},
+		{"traversal into foreign workspace", "/uploads/users/" + testUserID + "/../../" + foreignKey, member, http.StatusNotFound},
+		{"task token bound to another workspace", "/uploads/" + memberKey, map[string]string{"X-Test-User": testUserID, "X-Actor-Source": "task_token", "X-Workspace-ID": foreignWorkspaceID}, http.StatusForbidden},
+		{"funnel unsigned", "/uploads/" + memberKey, map[string]string{"X-Test-User": testUserID, "X-Multica-Public": "1"}, http.StatusForbidden},
+		{"funnel signed", local.ObjectURL(memberKey), map[string]string{"X-Multica-Public": "1"}, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			route(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("GET %s: status = %d, want %d; body=%q", tt.target, w.Code, tt.want, w.Body.String())
+			}
+		})
+	}
+}

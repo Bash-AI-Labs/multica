@@ -1485,10 +1485,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// /api/attachments download endpoint; self-hosted split-origin/same-origin
 	// clients can then iframe-preview PDFs/HTML fetched straight from the
 	// static route instead of hitting the global frame-ancestors 'none' CSP.
-	// See MUL-3821 / #4477. ServeLocalUpload also enforces the fork's HMAC
-	// signature check on public (funnel) reads — see its implementation.
+	// See MUL-3821 / #4477. LocalUploadRoute serves signed URLs to anyone and
+	// requires a signed-in workspace member for every other read.
 	if _, ok := store.(*storage.LocalStorage); ok {
-		r.Get("/uploads/*", h.ServeLocalUpload)
+		r.Get("/uploads/*", h.LocalUploadRoute(middleware.Auth(queries, patCache, cloudPATVerifier, cfSigner)))
 	}
 
 	// Capability-authenticated attachment download (MUL-5292). Public by

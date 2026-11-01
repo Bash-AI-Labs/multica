@@ -958,8 +958,62 @@ func shouldProxyAttachmentURL(rawURL string) bool {
 	return false
 }
 
+// LocalUploadRoute is the /uploads/* handler. A URL Multica signed is a
+// capability and is served to anyone. Any other read must pass requireAuth
+// and, for a workspace-scoped key, come from a member of that workspace: the
+// app itself is published on the public internet, so reaching the backend
+// directly no longer implies a trusted tailnet client. Reads from the funnel
+// webhook-proxy carry X-Multica-Public and are signature-only.
+func (h *Handler) LocalUploadRoute(requireAuth func(http.Handler) http.Handler) http.HandlerFunc {
+	authorized := requireAuth(http.HandlerFunc(h.serveLocalUploadToMember))
+	return func(w http.ResponseWriter, r *http.Request) {
+		local, ok := h.Storage.(*storage.LocalStorage)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		key := strings.TrimPrefix(r.URL.Path, "/uploads/")
+		if local.VerifyKey(key, r.URL.Query().Get("sig")) {
+			h.ServeLocalUpload(w, r)
+			return
+		}
+		if r.Header.Get("X-Multica-Public") != "" && local.SignatureEnabled() {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		authorized.ServeHTTP(w, r)
+	}
+}
+
+// serveLocalUploadToMember runs behind requireAuth, which sets X-User-ID.
+func (h *Handler) serveLocalUploadToMember(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/uploads/")
+	// Access is decided from the key prefix, so the key must be the path that
+	// gets served: "users/x/../workspaces/<other>/f" must not pass as users/.
+	if key == "" || path.Clean("/"+key) != "/"+key {
+		http.NotFound(w, r)
+		return
+	}
+	if rest, ok := strings.CutPrefix(key, workspaceUploadNamespace); ok {
+		workspaceID, _, _ := strings.Cut(rest, "/")
+		// A task token is bound to one workspace even when its owner belongs
+		// to others.
+		if r.Header.Get("X-Actor-Source") == "task_token" && !strings.EqualFold(r.Header.Get("X-Workspace-ID"), workspaceID) {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		if _, err := h.getWorkspaceMember(r.Context(), r.Header.Get("X-User-ID"), workspaceID); err != nil {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "private")
+	h.ServeLocalUpload(w, r)
+}
+
 // ServeLocalUpload serves a local-disk object from the public /uploads/*
-// route. It carries the same preview security headers as the authenticated
+// route once LocalUploadRoute has authorized the read. It carries the same
+// preview security headers as the authenticated
 // download endpoint so self-hosted deployments — same-origin or split
 // frontend/backend origins — can inline-render images and iframe-preview
 // documents (PDF/HTML) fetched straight from the static route. Without these
@@ -975,8 +1029,8 @@ func (h *Handler) ServeLocalUpload(w http.ResponseWriter, r *http.Request) {
 	// Public reads arrive through the funnel webhook-proxy, which stamps
 	// X-Multica-Public. Those must carry a valid HMAC signature so the
 	// publicly-exposed media path can't be enumerated or hot-linked without a
-	// URL Multica minted. Trusted tailnet reads hit the backend directly (no
-	// header) and stay open, so existing unsigned in-app links keep working.
+	// URL Multica minted. Unsigned in-app reads are member-gated by
+	// LocalUploadRoute before they get here.
 	if r.Header.Get("X-Multica-Public") != "" && local.SignatureEnabled() {
 		if !local.VerifyKey(key, r.URL.Query().Get("sig")) {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
