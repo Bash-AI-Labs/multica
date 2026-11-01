@@ -74,8 +74,14 @@ const HTML_ENTITIES: Record<string, string> = {
  * name, entities their character. Decoding is a single pass, so `&amp;lt;`
  * reads `&lt;` exactly as the author typed it.
  */
+// Snapshots are cut to ~200 runes server-side; this bound caps the worst case
+// of the regex passes below if an unbounded source (e.g. an autopilot title)
+// ever arrives.
+const MAX_TRIGGER_SUMMARY_INPUT = 2000;
+
 export function plainTriggerSummary(raw: string, imageLabel: string): string {
-  return stripMentionMarkdown(raw)
+  const bounded = raw.length > MAX_TRIGGER_SUMMARY_INPUT ? raw.slice(0, MAX_TRIGGER_SUMMARY_INPUT) : raw;
+  return stripMentionMarkdown(bounded)
     .replace(/!\[[^\]]*\]\([^)]*\)/g, imageLabel)
     .replace(/!\[[^\]]*(?:\]\([^)]*)?…?$/, imageLabel)
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")

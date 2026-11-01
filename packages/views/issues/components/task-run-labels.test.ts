@@ -44,4 +44,11 @@ describe("plainTriggerSummary", () => {
   it("collapses whitespace into one line", () => {
     expect(plainTriggerSummary("  first   line\n\nsecond ", IMAGE)).toBe("first line second");
   });
+
+  it("stays fast on pathological unclosed image and link markup", () => {
+    const started = performance.now();
+    plainTriggerSummary("![".repeat(50_000), IMAGE);
+    plainTriggerSummary("![](".repeat(50_000), IMAGE);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
