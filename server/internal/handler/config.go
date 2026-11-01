@@ -39,6 +39,9 @@ type AppConfig struct {
 	// with the operator's own domains instead of Multica Cloud defaults.
 	DaemonServerURL string `json:"daemon_server_url,omitempty"`
 	DaemonAppURL    string `json:"daemon_app_url,omitempty"`
+	// Explicit even when URLs are omitted, so clients never infer Cloud from
+	// missing self-host configuration. Older clients ignore this additive field.
+	DaemonSetupTarget string `json:"daemon_setup_target"`
 
 	// LocalModeEnabled tells the web frontend that it can call /auth/local-login
 	// to auto-login when no valid session exists (self-hosted local deployments).
@@ -131,6 +134,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	config.AttachmentPublicURL = h.cfg.PublicURL
 	config.CdnSigned = h.CFSigner != nil
 	config.DaemonServerURL, config.DaemonAppURL = daemonSetupURLsFromEnv()
+	config.DaemonSetupTarget = "self_host"
 	config.VCSIntegrationAvailable = h.cfg.VCSIntegrationEnabled
 	config.FeatureFlags = featureflags.EvaluateFrontendPublicFlags(r.Context(), h.FeatureFlags)
 	// Only surface the build version on self-hosted deployments. The managed
@@ -138,6 +142,8 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	// the Help popover's version row would just be noise there (MUL-4108).
 	if !isOfficialCloudDeployment() {
 		config.ServerVersion = h.cfg.ServerVersion
+	} else {
+		config.DaemonSetupTarget = "cloud"
 	}
 
 	// Re-read from env on every request so operators can rotate keys via

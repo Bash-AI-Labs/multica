@@ -958,8 +958,62 @@ func shouldProxyAttachmentURL(rawURL string) bool {
 	return false
 }
 
+// LocalUploadRoute is the /uploads/* handler. A URL Multica signed is a
+// capability and is served to anyone. Any other read must pass requireAuth
+// and, for a workspace-scoped key, come from a member of that workspace: the
+// app itself is published on the public internet, so reaching the backend
+// directly no longer implies a trusted tailnet client. Reads from the funnel
+// webhook-proxy carry X-Multica-Public and are signature-only.
+func (h *Handler) LocalUploadRoute(requireAuth func(http.Handler) http.Handler) http.HandlerFunc {
+	authorized := requireAuth(http.HandlerFunc(h.serveLocalUploadToMember))
+	return func(w http.ResponseWriter, r *http.Request) {
+		local, ok := h.Storage.(*storage.LocalStorage)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		key := strings.TrimPrefix(r.URL.Path, "/uploads/")
+		if local.VerifyKey(key, r.URL.Query().Get("sig")) {
+			h.ServeLocalUpload(w, r)
+			return
+		}
+		if r.Header.Get("X-Multica-Public") != "" && local.SignatureEnabled() {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		authorized.ServeHTTP(w, r)
+	}
+}
+
+// serveLocalUploadToMember runs behind requireAuth, which sets X-User-ID.
+func (h *Handler) serveLocalUploadToMember(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/uploads/")
+	// Access is decided from the key prefix, so the key must be the path that
+	// gets served: "users/x/../workspaces/<other>/f" must not pass as users/.
+	if key == "" || path.Clean("/"+key) != "/"+key {
+		http.NotFound(w, r)
+		return
+	}
+	if rest, ok := strings.CutPrefix(key, workspaceUploadNamespace); ok {
+		workspaceID, _, _ := strings.Cut(rest, "/")
+		// A task token is bound to one workspace even when its owner belongs
+		// to others.
+		if r.Header.Get("X-Actor-Source") == "task_token" && !strings.EqualFold(r.Header.Get("X-Workspace-ID"), workspaceID) {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		if _, err := h.getWorkspaceMember(r.Context(), r.Header.Get("X-User-ID"), workspaceID); err != nil {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "private")
+	h.ServeLocalUpload(w, r)
+}
+
 // ServeLocalUpload serves a local-disk object from the public /uploads/*
-// route. It carries the same preview security headers as the authenticated
+// route once LocalUploadRoute has authorized the read. It carries the same
+// preview security headers as the authenticated
 // download endpoint so self-hosted deployments — same-origin or split
 // frontend/backend origins — can inline-render images and iframe-preview
 // documents (PDF/HTML) fetched straight from the static route. Without these
@@ -975,8 +1029,8 @@ func (h *Handler) ServeLocalUpload(w http.ResponseWriter, r *http.Request) {
 	// Public reads arrive through the funnel webhook-proxy, which stamps
 	// X-Multica-Public. Those must carry a valid HMAC signature so the
 	// publicly-exposed media path can't be enumerated or hot-linked without a
-	// URL Multica minted. Trusted tailnet reads hit the backend directly (no
-	// header) and stay open, so existing unsigned in-app links keep working.
+	// URL Multica minted. Unsigned in-app reads are member-gated by
+	// LocalUploadRoute before they get here.
 	if r.Header.Get("X-Multica-Public") != "" && local.SignatureEnabled() {
 		if !local.VerifyKey(key, r.URL.Query().Get("sig")) {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
@@ -1356,70 +1410,11 @@ func (h *Handler) GetAttachmentContent(w http.ResponseWriter, r *http.Request) {
 
 // isTextPreviewable is the whitelist for the text preview proxy.
 //
-// IMPORTANT — KEEP IN SYNC with the client-side mirror in
-// packages/views/editor/utils/preview.ts (TEXT_EXTENSIONS / TEXT_CONTENT_TYPES
-// / TEXT_BASENAMES + extensionToLanguage). If a type is allowed here but not
-// mapped client-side the user sees raw unhighlighted text; if mapped client-side
-// but rejected here the user sees a 415 fallback.
-//
-// TODO(follow-up): extract this list to a JSON single-source-of-truth and
-// generate the TS side, mirroring the reserved-slugs pattern (see
-// server/internal/handler/reserved_slugs.json + scripts/generate-reserved-slugs.mjs).
-// Drift severity here is low (worst case: Eye button visible but proxy 415s,
-// modal shows the unsupported fallback — still functional, just confusing),
-// so it ships as manual hand-sync for v1.
-//
-// We check both content_type and extension because http.DetectContentType
-// regularly returns "text/plain" for Markdown / source code, so a pure
-// content-type check would 415 those.
+// The Go handler embeds attachment_text_preview.json directly. The client
+// imports a generated representation of the same source, and CI rejects stale
+// generated output.
 func isTextPreviewable(contentType, filename string) bool {
-	ct := strings.ToLower(strings.TrimSpace(contentType))
-	// Strip params (e.g. "text/plain; charset=utf-8")
-	if idx := strings.Index(ct, ";"); idx >= 0 {
-		ct = strings.TrimSpace(ct[:idx])
-	}
-	if strings.HasPrefix(ct, "text/") {
-		return true
-	}
-	switch ct {
-	case "application/json",
-		"application/x-ndjson",
-		"application/javascript",
-		"application/xml",
-		"application/x-yaml",
-		"application/yaml",
-		"application/toml",
-		"application/x-sh",
-		"application/x-httpd-php":
-		return true
-	}
-
-	ext := strings.ToLower(path.Ext(filename))
-	switch ext {
-	case ".md", ".markdown",
-		".txt", ".log",
-		".csv", ".tsv",
-		".html", ".htm",
-		".json", ".jsonl", ".ndjson", ".xml",
-		".yml", ".yaml", ".toml", ".ini", ".conf",
-		".sh", ".bash", ".zsh",
-		".py", ".rb", ".go", ".rs",
-		".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-		".css", ".scss", ".sass", ".less",
-		".sql",
-		".java", ".kt", ".swift",
-		".c", ".cc", ".cpp", ".h", ".hpp",
-		".cs", ".php", ".lua", ".vim",
-		".dockerfile", ".makefile", ".gitignore":
-		return true
-	}
-	// Filenames without extension that match well-known build files.
-	base := strings.ToLower(path.Base(filename))
-	switch base {
-	case "dockerfile", "makefile", ".env":
-		return true
-	}
-	return false
+	return attachmentTextPreview.allows(contentType, filename)
 }
 
 // DeleteAttachment — DELETE /api/attachments/{id}
