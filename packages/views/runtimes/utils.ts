@@ -611,13 +611,21 @@ function pricingCandidates(model: string, provider?: string): string[] {
 // `claude-opus-4-8[context=1m,effort=high,fast=true]`.
 const CURSOR_VARIANT_SUFFIX = /-(?:fast|thinking|none|minimal|low|medium|high|xhigh|extra-high|max)$/;
 
+function terminalBracketSuffix(value: string): { start: number; content: string } | null {
+  if (!value.endsWith("]")) return null;
+  const previousClose = value.lastIndexOf("]", value.length - 2);
+  const start = value.indexOf("[", previousClose + 1);
+  if (start === -1) return null;
+  return { start, content: value.slice(start + 1, -1) };
+}
+
 function cursorBaseModel(model: string): { base: string; fast: boolean } {
   let id = model.trim().toLowerCase();
   let fast = false;
-  const params = id.match(/\[([^\]]*)\]$/);
+  const params = terminalBracketSuffix(id);
   if (params) {
-    fast = /(?:^|,)\s*fast\s*=\s*true\s*(?:,|$)/.test(params[1] ?? "");
-    id = id.slice(0, params.index);
+    fast = /(?:^|,)\s*fast\s*=\s*true\s*(?:,|$)/.test(params.content);
+    id = id.slice(0, params.start);
   }
   for (let m = id.match(CURSOR_VARIANT_SUFFIX); m; m = id.match(CURSOR_VARIANT_SUFFIX)) {
     if (m[0] === "-fast") fast = true;
@@ -732,14 +740,36 @@ function canonicalCandidates(model: string): string[] {
   const stripBedrock = (s: string) => {
     const prefix = /^(?:(?:us|eu|apac|global)\.)?anthropic\.(claude-)/;
     if (!prefix.test(s)) return s;
-    return s
-      .replace(prefix, "$1")
-      .replace(/-v\d+:\d+(\[[^\]]+\])?$/, "$1");
+    const withoutPrefix = s.replace(prefix, "$1");
+    const tag = terminalBracketSuffix(withoutPrefix);
+    const versionEnd =
+      tag && tag.content.length > 0 ? tag.start : withoutPrefix.length;
+    let cursor = versionEnd;
+    while (cursor > 0 && /\d/.test(withoutPrefix[cursor - 1]!)) cursor--;
+    if (cursor === versionEnd || withoutPrefix[cursor - 1] !== ":") {
+      return withoutPrefix;
+    }
+    cursor--;
+    const versionDigitsEnd = cursor;
+    while (cursor > 0 && /\d/.test(withoutPrefix[cursor - 1]!)) cursor--;
+    if (
+      cursor === versionDigitsEnd ||
+      withoutPrefix.slice(cursor - 2, cursor) !== "-v"
+    ) {
+      return withoutPrefix;
+    }
+    const suffix = tag && tag.content.length > 0
+      ? withoutPrefix.slice(tag.start)
+      : "";
+    return withoutPrefix.slice(0, cursor - 2) + suffix;
   };
   // Trailing context-window tag (`claude-opus-4-7[1m]`). Same family,
   // same price tier — see resolver comment above for the 1M-context
   // pricing trade-off.
-  const stripContextTag = (s: string) => s.replace(/\[[^\]]+\]$/, "");
+  const stripContextTag = (s: string) => {
+    const tag = terminalBracketSuffix(s);
+    return tag && tag.content.length > 0 ? s.slice(0, tag.start) : s;
+  };
 
   // Antigravity's display labels and effort-suffixed IDs refer to the same
   // Gemini SKU. Match only recognized shapes; never strip arbitrary variants.

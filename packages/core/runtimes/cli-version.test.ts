@@ -29,6 +29,15 @@ describe("checkQuickCreateCliVersion", () => {
     expect(checkQuickCreateCliVersion("v0.2.15-235-gdaf0e935-dirty").state).toBe("ok");
     expect(checkQuickCreateCliVersion("0.1.0-1-gabc1234").state).toBe("ok");
   });
+
+  it("rejects adversarial digit runs in linear time", () => {
+    const started = performance.now();
+    expect(checkQuickCreateCliVersion("0".repeat(100_000)).state).toBe("missing");
+    expect(
+      checkQuickCreateCliVersion(`v0.2.15-${"0".repeat(100_000)}-x`).state,
+    ).toBe("too_old");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("checkQuickCreateFieldsCliVersion", () => {

@@ -20,6 +20,17 @@ describe("resolvePublicFileUrlWithBase", () => {
     );
   });
 
+  it("strips an adversarial base-URL slash run in linear time", () => {
+    const started = performance.now();
+    expect(
+      resolvePublicFileUrlWithBase(
+        "/upload/a.png",
+        `http://127.0.0.1:8080${"/".repeat(100_000)}`,
+      ),
+    ).toBe("http://127.0.0.1:8080/upload/a.png");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
   it("keeps absolute URLs unchanged", () => {
     expect(resolvePublicFileUrlWithBase("https://cdn.example.com/a.png", "http://127.0.0.1:8080")).toBe(
       "https://cdn.example.com/a.png",

@@ -8,9 +8,15 @@ import { __FRAGMENT_NAV_SHIM__ } from "./iframe-fragment-nav";
 //
 // scrollIntoView is not implemented in jsdom; we stub it per-test.
 function loadShimIntoDocument() {
-  const inner = __FRAGMENT_NAV_SHIM__
-    .replace(/^<script>/, "")
-    .replace(/<\/script>$/, "");
+  const open = "<script>";
+  const close = "</script>";
+  if (
+    !__FRAGMENT_NAV_SHIM__.startsWith(open) ||
+    !__FRAGMENT_NAV_SHIM__.endsWith(close)
+  ) {
+    throw new Error("fragment-nav shim must be a script element");
+  }
+  const inner = __FRAGMENT_NAV_SHIM__.slice(open.length, -close.length);
   new Function(inner)();
 }
 

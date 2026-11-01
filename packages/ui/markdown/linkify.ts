@@ -53,6 +53,31 @@ export interface CodeRange {
   end: number
 }
 
+function isEmailAddress(value: string): boolean {
+  const at = value.indexOf('@')
+  if (at <= 0 || at !== value.lastIndexOf('@') || at === value.length - 1) {
+    return false
+  }
+
+  let domainDot = false
+  for (let i = 0; i < value.length; i++) {
+    if (i === at) continue
+    const character = value[i]!
+    if (
+      character === '/' ||
+      character === ':' ||
+      character === '@' ||
+      character.trim() === ''
+    ) {
+      return false
+    }
+    if (i > at + 1 && i < value.length - 1 && character === '.') {
+      domainDot = true
+    }
+  }
+  return domainDot
+}
+
 /**
  * Product policy for automatic external links.
  *
@@ -66,10 +91,12 @@ export interface CodeRange {
  * paste, and read-only display cannot drift again.
  */
 export function shouldAutoLink(value: string): boolean {
+  const lower = value.toLowerCase()
   return (
-    /^https?:\/\//i.test(value) ||
-    /^www\./i.test(value) ||
-    /^[^\s@/:]+@[^\s@/:]+\.[^\s@/:]+$/.test(value)
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('www.') ||
+    isEmailAddress(value)
   )
 }
 

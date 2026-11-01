@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { preprocessLinks } from "@multica/ui/markdown/linkify";
+import {
+  preprocessLinks,
+  shouldAutoLink,
+} from "@multica/ui/markdown/linkify";
 
 // The bug: linkify-it does not treat CJK full-width punctuation as a URL
 // boundary, so the href can swallow trailing punctuation and the Chinese
@@ -135,6 +138,13 @@ describe("preprocessLinks — bare filenames are not auto-linked as URLs", () =>
     ).toBe(
       "[http://4399.com](http://4399.com) [https://4399.com](https://4399.com) [www.4399.com](https://www.4399.com) [contact@example.com](mailto:contact@example.com) 4399.com ai.md ftp://example.com",
     );
+  });
+
+  it("rejects an adversarial email candidate in linear time", () => {
+    const candidate = `!@${"!.".repeat(50_000)}`;
+    const started = performance.now();
+    expect(shouldAutoLink(candidate)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(50);
   });
 
   it("still detects explicit ./ file paths (FILE_PATH_REGEX regression)", () => {

@@ -333,6 +333,26 @@ describe("CreateSkillDialog local import", () => {
 });
 
 describe("CreateSkillDialog opened on a method", () => {
+  it("recognizes supported URL sources by hostname, not substring", () => {
+    renderDialog(vi.fn(), vi.fn(), "url");
+    const input = screen.getByLabelText(enSkills.create.url.url_label);
+    const githubLink = screen.getByRole("button", {
+      name: "github.com/owner/repo",
+    });
+    const githubCard = githubLink.parentElement;
+    expect(githubCard).not.toBeNull();
+
+    fireEvent.change(input, {
+      target: { value: "https://github.com.evil.test/owner/repo" },
+    });
+    expect(githubCard?.className).not.toContain("border-primary");
+
+    fireEvent.change(input, {
+      target: { value: "https://www.github.com/owner/repo" },
+    });
+    expect(githubCard?.className).toContain("border-primary");
+  });
+
   it("skips the chooser, and Cancel leaves the dialog", () => {
     const { onClose } = renderDialog(vi.fn(), vi.fn(), "manual");
     expect(screen.getByText(enSkills.create.manual.name_label)).toBeInTheDocument();

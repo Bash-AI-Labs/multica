@@ -28,6 +28,12 @@ describe("workspaceUrlHost", () => {
     );
   });
 
+  it("handles adversarial fragment runs in linear time", () => {
+    const started = performance.now();
+    expect(workspaceUrlHost("#".repeat(100_000))).toBe("multica.ai");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
   it("falls back to the brand host when no app URL is configured", () => {
     expect(workspaceUrlHost("")).toBe("multica.ai");
     expect(workspaceUrlHost("   ")).toBe("multica.ai");

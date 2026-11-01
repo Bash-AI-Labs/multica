@@ -244,10 +244,23 @@ function ManualForm({
 type DetectedSource = "clawhub" | "skills.sh" | "github" | null;
 
 function detectUrlSource(url: string): DetectedSource {
-  const u = url.trim().toLowerCase();
-  if (u.includes("clawhub.ai")) return "clawhub";
-  if (u.includes("skills.sh")) return "skills.sh";
-  if (u.includes("github.com")) return "github";
+  const value = url.trim();
+  if (!value) return null;
+  let hostname: string;
+  try {
+    const parsed = new URL(
+      value.includes("://") ? value : `https://${value}`,
+    );
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    hostname = parsed.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const matches = (domain: string) =>
+    hostname === domain || hostname.endsWith(`.${domain}`);
+  if (matches("clawhub.ai")) return "clawhub";
+  if (matches("skills.sh")) return "skills.sh";
+  if (matches("github.com")) return "github";
   return null;
 }
 

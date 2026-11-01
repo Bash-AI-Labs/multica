@@ -23,7 +23,63 @@ export interface CliVersionCheck {
   min: string;
 }
 
-const SEMVER_RE = /v?(\d+)\.(\d+)\.(\d+)/;
+function isDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= "0" && value <= "9";
+}
+
+function isHexDigit(value: string | undefined): boolean {
+  return (
+    isDigit(value) ||
+    (value !== undefined && value.toLowerCase() >= "a" && value.toLowerCase() <= "f")
+  );
+}
+
+function scanDigits(value: string, start: number): number {
+  let end = start;
+  while (isDigit(value[end])) end++;
+  return end;
+}
+
+function parseSemver(raw: string): [number, number, number] | null {
+  const value = raw.trim();
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    let majorStart = cursor;
+    if (value[cursor] === "v" && isDigit(value[cursor + 1])) {
+      majorStart++;
+    } else if (!isDigit(value[cursor])) {
+      cursor++;
+      continue;
+    }
+
+    const majorEnd = scanDigits(value, majorStart);
+    if (value[majorEnd] !== ".") {
+      cursor = majorEnd;
+      continue;
+    }
+    const minorStart = majorEnd + 1;
+    const minorEnd = scanDigits(value, minorStart);
+    if (minorEnd === minorStart || value[minorEnd] !== ".") {
+      cursor = Math.max(minorEnd, minorStart);
+      continue;
+    }
+    const patchStart = minorEnd + 1;
+    const patchEnd = scanDigits(value, patchStart);
+    if (patchEnd === patchStart) {
+      cursor = patchStart;
+      continue;
+    }
+
+    return [
+      Number(value.slice(majorStart, majorEnd)),
+      Number(value.slice(minorStart, minorEnd)),
+      Number(value.slice(patchStart, patchEnd)),
+    ];
+  }
+
+  return null;
+}
 
 // Matches the `git describe --tags --always --dirty` output for a build past
 // the latest tag, e.g. `v0.2.15-235-gdaf0e935` or `v0.2.15-235-gdaf0e935-dirty`.
@@ -31,12 +87,27 @@ const SEMVER_RE = /v?(\d+)\.(\d+)\.(\d+)/;
 // shape; tagged releases are bare semver. Treating dev-described daemons as OK
 // is what keeps `pnpm dev:desktop` + `make daemon` unblocked without weakening
 // the gate for staging or production users running stale stable releases.
-const DEV_DESCRIBE_RE = /^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+/;
-
-function parseSemver(raw: string): [number, number, number] | null {
-  const m = SEMVER_RE.exec(raw.trim());
-  if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+function isDevDescribe(value: string): boolean {
+  let cursor = value[0] === "v" ? 1 : 0;
+  for (let part = 0; part < 3; part++) {
+    const end = scanDigits(value, cursor);
+    if (end === cursor) return false;
+    cursor = end;
+    if (part < 2) {
+      if (value[cursor] !== ".") return false;
+      cursor++;
+    }
+  }
+  if (value[cursor] !== "-") return false;
+  cursor++;
+  const commitsEnd = scanDigits(value, cursor);
+  if (commitsEnd === cursor || value.slice(commitsEnd, commitsEnd + 2) !== "-g") {
+    return false;
+  }
+  cursor = commitsEnd + 2;
+  const hashStart = cursor;
+  while (isHexDigit(value[cursor])) cursor++;
+  return cursor > hashStart;
 }
 
 function lessThan(a: [number, number, number], b: [number, number, number]) {
@@ -68,7 +139,7 @@ function checkCliVersion(
   minimum: string,
 ): CliVersionCheck {
   const current = (detected ?? "").trim();
-  if (DEV_DESCRIBE_RE.test(current)) {
+  if (isDevDescribe(current)) {
     return { state: "ok", current, min: minimum };
   }
   const parsed = current ? parseSemver(current) : null;
@@ -113,7 +184,7 @@ export function chatProjectContextSupported(detected: string | undefined | null)
 function meetsMinCliVersion(detected: string | undefined | null, minimum: string): boolean {
   const current = (detected ?? "").trim();
   if (!current) return false;
-  if (DEV_DESCRIBE_RE.test(current)) return true;
+  if (isDevDescribe(current)) return true;
   const parsed = parseSemver(current);
   if (!parsed) return false;
   return !lessThan(parsed, parseSemver(minimum)!);

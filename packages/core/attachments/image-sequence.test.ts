@@ -185,6 +185,16 @@ describe("collectImageSequence", () => {
     expect(sequence.map((i) => i.key)).toEqual(["https://cdn/yes.png"]);
   });
 
+  it("masks adversarial unmatched backtick runs in linear time", () => {
+    const started = performance.now();
+    const sequence = collectImageSequence([
+      { content: `text ${"`".repeat(100_000)}![visible](https://cdn/yes.png)` },
+    ]);
+
+    expect(sequence.map((item) => item.key)).toEqual(["https://cdn/yes.png"]);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
   it("reads raw <img> tags and image-named file cards", () => {
     const sequence = collectImageSequence([
       {

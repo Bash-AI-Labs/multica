@@ -182,6 +182,41 @@ function blankOut(text: string): string {
   return text.replace(/[^\n]/g, " ");
 }
 
+function maskInlineCode(line: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < line.length) {
+    const open = line.indexOf("`", cursor);
+    if (open === -1) {
+      result += line.slice(cursor);
+      break;
+    }
+
+    let openEnd = open;
+    while (line[openEnd] === "`") openEnd++;
+    const markerLength = openEnd - open;
+    result += line.slice(cursor, open);
+
+    if (markerLength > 1) {
+      const matchedEnd = openEnd - (markerLength % 2);
+      result += blankOut(line.slice(open, matchedEnd));
+      cursor = matchedEnd;
+      continue;
+    }
+
+    const close = line.indexOf("`", openEnd);
+    if (close === -1) {
+      result += line.slice(open);
+      break;
+    }
+    result += blankOut(line.slice(open, close + 1));
+    cursor = close + 1;
+  }
+
+  return result;
+}
+
 /**
  * Blank every code span and fenced block, preserving offsets and line breaks.
  *
@@ -189,9 +224,8 @@ function blankOut(text: string): string {
  * common in agent replies explaining markdown — would be counted as a real
  * image and the reader would page onto something that was never rendered.
  *
- * Line scanner rather than one multiline regex: a backreferenced
- * `(`{3,})[\s\S]*?\1` over agent output is a ReDoS shape, and this runs on
- * every issue/chat render.
+ * Line scanners rather than backreferenced multiline/inline regexes: this runs
+ * over user- and agent-authored text on every issue/chat render.
  */
 function maskCode(content: string): string {
   const lines = content.split("\n");
@@ -213,7 +247,7 @@ function maskCode(content: string): string {
       lines[i] = blankOut(line);
       continue;
     }
-    lines[i] = line.replace(/(`+)[^`\n]*?\1/g, blankOut);
+    lines[i] = maskInlineCode(line);
   }
   return lines.join("\n");
 }

@@ -28,6 +28,7 @@ for (const [platform, arch, goos, goarch, foreignCaller] of [
         const scripts = join(root, "apps", "desktop", "scripts");
         const bin = join(root, "fake-bin");
         const record = join(root, "build.json");
+        const codesignRecord = join(root, "codesign.json");
         const caller = join(root, "foreign-caller");
         mkdirSync(scripts, { recursive: true });
         mkdirSync(bin);
@@ -54,10 +55,13 @@ else if (args[0] === "build") {
   fs.writeFileSync(args[args.indexOf("-o") + 1], "fake artifact");
 } else process.exit(2);
 `);
-        fakeExecutable(join(bin, "codesign"), "process.exit(0);\n");
+        fakeExecutable(join(bin, "codesign"), `
+const fs = await import("node:fs");
+fs.writeFileSync(process.env.TEST_CODESIGN_RECORD, JSON.stringify(process.argv.slice(2)));
+`);
         execFileSync(process.execPath, [join(scripts, "bundle-cli.mjs"), "--target-platform", platform, "--target-arch", arch], {
           cwd: foreignCaller ? caller : root,
-          env: { PATH: bin, HOME: root, TEST_SOURCE_ROOT: realpathSync(root), TEST_BUILD_RECORD: record, TEST_MISSING_REVISION: String(missingRevision) },
+          env: { PATH: bin, HOME: root, TEST_SOURCE_ROOT: realpathSync(root), TEST_BUILD_RECORD: record, TEST_CODESIGN_RECORD: codesignRecord, TEST_MISSING_REVISION: String(missingRevision) },
           stdio: "pipe",
         });
         const build = JSON.parse(readFileSync(record, "utf8"));
@@ -69,7 +73,16 @@ else if (args[0] === "build") {
         assert.equal(build.goarch, goarch);
         assert.equal(build.cgo, "0");
         const artifact = platform === "win32" ? "multica.exe" : "multica";
-        assert.equal(readFileSync(join(root, "apps", "desktop", "resources", "bin", artifact), "utf8"), "fake artifact");
+        const bundledPath = join(root, "apps", "desktop", "resources", "bin", artifact);
+        assert.equal(readFileSync(bundledPath, "utf8"), "fake artifact");
+        if (process.platform === "darwin") {
+          assert.deepEqual(JSON.parse(readFileSync(codesignRecord, "utf8")), [
+            "-s",
+            "-",
+            "--force",
+            bundledPath,
+          ]);
+        }
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

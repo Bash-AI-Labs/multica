@@ -83,6 +83,17 @@ describe("agent builder protocol", () => {
     );
   });
 
+  it("handles adversarial draft delimiters in linear time", () => {
+    const parseInput = `<agent_draft>${"<agent_draft>a".repeat(20_000)}`;
+    const stripInput = `Visible${" ".repeat(50_000)}<agent_draft>${"x".repeat(50_000)}`;
+    const started = performance.now();
+
+    expect(parseBuilderDraft(parseInput)).toBeNull();
+    expect(stripBuilderDraft(stripInput)).toBe("Visible");
+
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
   it("repairs literal line breaks emitted inside the instructions string", () => {
     const content = `<agent_draft>{"name":"Reviewer","instructions":"# Role
 Review every change.
