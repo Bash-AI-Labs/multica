@@ -93,6 +93,10 @@ type Config struct {
 	// "missing key" message a cloud user cannot act on. Populated from
 	// MULTICA_VCS_INTEGRATION_ENABLED; the self-host compose defaults it on.
 	VCSIntegrationEnabled bool
+	// VCSPrivateURLs is an operator-controlled exact allowlist of self-hosted
+	// Git provider base URLs that may resolve to private network addresses.
+	// Workspace admins can choose an instance URL, but cannot widen this list.
+	VCSPrivateURLs []string
 	// PublicURL is the absolute base URL the API is reachable at from the
 	// public internet, with no trailing slash (e.g. "https://multica.ai").
 	// Used to build webhook_url responses and the fixed Remote MCP OAuth

@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // Kind identifies a provider. The string values are persisted on
@@ -112,6 +114,10 @@ type Account struct {
 	Login string
 }
 
+type ValidationOptions struct {
+	AllowPrivate bool
+}
+
 // Provider is the per-provider adapter. Implementations are stateless and cheap
 // to construct; the registry holds one instance per kind.
 type Provider interface {
@@ -128,7 +134,7 @@ type Provider interface {
 	ParseCIStatus(body []byte) (CIStatusEvent, error)
 	// ValidateToken confirms the token works against instanceURL and returns
 	// the authenticated account. Maps a 401/403 to ErrUnauthorized.
-	ValidateToken(ctx context.Context, instanceURL, token string) (Account, error)
+	ValidateToken(ctx context.Context, instanceURL, token string, options ValidationOptions) (Account, error)
 }
 
 // registry maps a Kind to its Provider. Populated by package init in the
@@ -141,4 +147,58 @@ func register(p Provider) { registry[p.Kind()] = p }
 func For(kind string) (Provider, bool) {
 	p, ok := registry[Kind(kind)]
 	return p, ok
+}
+
+func ParseInstanceURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, "\r\n") {
+		return nil, errors.New("instance URL is empty or contains control characters")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Opaque != "" || parsed.Hostname() == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return nil, errors.New("instance URL must be an absolute HTTP(S) URL without userinfo, query, or fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return parsed, nil
+}
+
+// NormalizeInstanceURL trims and canonicalizes a valid instance URL. Invalid
+// values remain only trimmed so callers that need a trust decision must use
+// ParseInstanceURL.
+func NormalizeInstanceURL(raw string) string {
+	parsed, err := ParseInstanceURL(raw)
+	if err != nil {
+		return strings.TrimRight(strings.TrimSpace(raw), "/")
+	}
+	return parsed.String()
+}
+
+func PrivateNetworkAllowed(instanceURL string, allowlist []string) bool {
+	target, err := ParseInstanceURL(instanceURL)
+	if err != nil {
+		return false
+	}
+	for _, raw := range allowlist {
+		allowed, allowErr := ParseInstanceURL(raw)
+		if allowErr == nil && allowed.String() == target.String() {
+			return true
+		}
+	}
+	return false
+}
+
+func validationEndpoint(instanceURL, suffix string) (*url.URL, error) {
+	base, err := ParseInstanceURL(instanceURL)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := *base
+	endpoint.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(suffix, "/")
+	endpoint.RawPath = ""
+	return &endpoint, nil
 }

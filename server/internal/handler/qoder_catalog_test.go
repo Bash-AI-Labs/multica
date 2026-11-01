@@ -5,9 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
+
+func testQoderCatalog(t *testing.T, server *httptest.Server, token, kind string) ([]qoderCatalogItem, error) {
+	t.Helper()
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	return fetchQoderCatalogWithClient(context.Background(), server.Client(), base, token, kind)
+}
 
 func TestQoderCatalogPaginationAndRedaction(t *testing.T) {
 	requests := 0
@@ -27,7 +37,7 @@ func TestQoderCatalogPaginationAndRedaction(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	items, err := fetchQoderCatalog(context.Background(), server.URL, "private-token", "environments")
+	items, err := testQoderCatalog(t, server, "private-token", "environments")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,16 +52,24 @@ func TestQoderCatalogPaginationAndRedaction(t *testing.T) {
 func TestQoderCatalogRejectsMalformedAndRedactsErrors(t *testing.T) {
 	for _, body := range []string{`{}`, `{"data":null}`, `{"data":[{"id":"wrong"}]}`, `{"data":[],"has_more":true}`} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
-		if _, err := fetchQoderCatalog(context.Background(), server.URL, "private-token", "environments"); err == nil {
+		if _, err := testQoderCatalog(t, server, "private-token", "environments"); err == nil {
 			t.Errorf("accepted %s", body)
 		}
 		server.Close()
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "private-token", 401) }))
 	defer server.Close()
-	_, err := fetchQoderCatalog(context.Background(), server.URL, "private-token", "agents")
+	_, err := testQoderCatalog(t, server, "private-token", "agents")
 	if err == nil || strings.Contains(err.Error(), "private-token") {
 		t.Fatal("provider error was not redacted")
+	}
+}
+
+func TestQoderCatalogRequiresOfficialEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	if _, err := fetchQoderCatalog(context.Background(), server.URL, "private-token", "agents"); err == nil {
+		t.Fatal("fetchQoderCatalog accepted a non-Qoder endpoint")
 	}
 }
 

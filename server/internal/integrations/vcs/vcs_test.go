@@ -45,6 +45,36 @@ func TestNormalizeInstanceURL(t *testing.T) {
 	}
 }
 
+func TestParseInstanceURLRejectsURLConfusion(t *testing.T) {
+	for _, raw := range []string{
+		"https://user@example.com",
+		"https://example.com?path=/api/v1/user",
+		"https://example.com/#/api/v1/user",
+		"https://example.com\r\nHost: internal",
+		"file:///etc/passwd",
+	} {
+		if _, err := ParseInstanceURL(raw); err == nil {
+			t.Errorf("ParseInstanceURL(%q) succeeded", raw)
+		}
+	}
+}
+
+func TestPrivateNetworkAllowedRequiresExactConfiguredURL(t *testing.T) {
+	allowlist := []string{"https://gitlab.internal/gitlab"}
+	if !PrivateNetworkAllowed("https://gitlab.internal/gitlab/", allowlist) {
+		t.Fatal("exact configured private URL was not allowed")
+	}
+	for _, raw := range []string{
+		"https://gitlab.internal",
+		"http://gitlab.internal/gitlab",
+		"https://other.internal/gitlab",
+	} {
+		if PrivateNetworkAllowed(raw, allowlist) {
+			t.Errorf("PrivateNetworkAllowed(%q) matched a different URL", raw)
+		}
+	}
+}
+
 func TestForgejoVerifySignature(t *testing.T) {
 	p, _ := For("forgejo")
 	secret, body := "s3cr3t", []byte(`{"action":"opened"}`)
@@ -206,7 +236,7 @@ func TestValidateToken(t *testing.T) {
 			}))
 			defer srv.Close()
 			p, _ := For(c.kind)
-			acct, err := p.ValidateToken(context.Background(), srv.URL, "tok")
+			acct, err := p.ValidateToken(context.Background(), srv.URL, "tok", ValidationOptions{AllowPrivate: true})
 			if err != nil {
 				t.Fatalf("ValidateToken: %v", err)
 			}
@@ -291,7 +321,7 @@ func TestValidateTokenUnauthorized(t *testing.T) {
 	}))
 	defer srv.Close()
 	p, _ := For("forgejo")
-	_, err := p.ValidateToken(context.Background(), srv.URL, "bad")
+	_, err := p.ValidateToken(context.Background(), srv.URL, "bad", ValidationOptions{AllowPrivate: true})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
 	}

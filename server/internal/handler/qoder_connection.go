@@ -221,9 +221,14 @@ func (h *Handler) CheckQoderConnection(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	base, client, err := newQoderHTTPClient(cfg.BaseURL)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
 	for path, expectedID := range map[string]string{"/environments/" + url.PathEscape(cfg.EnvironmentID): cfg.EnvironmentID} {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", cfg.BaseURL+path, nil)
+		endpoint := qoderEndpoint(base, path)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint.String(), nil)
 		if err != nil {
 			writeError(w, 400, "invalid Qoder Cloud Agents resource")
 			return

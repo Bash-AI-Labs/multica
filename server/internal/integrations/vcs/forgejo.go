@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/httptransport"
 )
 
 // forgejoProvider implements Provider for Forgejo and its upstream Gitea, which
@@ -181,16 +183,23 @@ func normalizeForgejoState(s string) string {
 	}
 }
 
-func (p forgejoProvider) ValidateToken(ctx context.Context, instanceURL, token string) (Account, error) {
-	endpoint := NormalizeInstanceURL(instanceURL) + "/api/v1/user"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (p forgejoProvider) ValidateToken(ctx context.Context, instanceURL, token string, options ValidationOptions) (Account, error) {
+	endpoint, err := validationEndpoint(instanceURL, "/api/v1/user")
+	if err != nil {
+		return Account{}, fmt.Errorf("forgejo: build endpoint: %w", err)
+	}
+	client, err := httptransport.NewRestrictedClient(endpoint, 15*time.Second, options.AllowPrivate)
+	if err != nil {
+		return Account{}, fmt.Errorf("forgejo: build client: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return Account{}, fmt.Errorf("forgejo: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Account{}, fmt.Errorf("forgejo: request: %w", err)
 	}
@@ -202,7 +211,7 @@ func (p forgejoProvider) ValidateToken(ctx context.Context, instanceURL, token s
 		// leaking the secret into the HTTP response.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		slog.Warn("forgejo: token validation rejected",
-			"endpoint", endpoint,
+			"endpoint", endpoint.String(),
 			"status", resp.StatusCode,
 			"body", strings.TrimSpace(string(b)))
 		return Account{}, ErrUnauthorized
@@ -223,16 +232,6 @@ func (p forgejoProvider) ValidateToken(ctx context.Context, instanceURL, token s
 		return Account{}, errors.New("forgejo: user response missing login")
 	}
 	return Account{Login: login}, nil
-}
-
-// ── shared helpers ──────────────────────────────────────────────────────────
-
-var httpClient = &http.Client{Timeout: 15 * time.Second}
-
-// NormalizeInstanceURL trims whitespace and any trailing slash so stored
-// instance URLs and derived webhook URLs are stable regardless of input.
-func NormalizeInstanceURL(raw string) string {
-	return strings.TrimRight(strings.TrimSpace(raw), "/")
 }
 
 // derivePRState collapses (state, draft, merged) into the normalized PR state.

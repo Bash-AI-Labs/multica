@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/httptransport"
 )
 
 // gitlabProvider implements Provider for GitLab, which differs from
@@ -202,16 +204,23 @@ func normalizeGitLabPipelineState(s string) string {
 	}
 }
 
-func (gitlabProvider) ValidateToken(ctx context.Context, instanceURL, token string) (Account, error) {
-	endpoint := NormalizeInstanceURL(instanceURL) + "/api/v4/user"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (gitlabProvider) ValidateToken(ctx context.Context, instanceURL, token string, options ValidationOptions) (Account, error) {
+	endpoint, err := validationEndpoint(instanceURL, "/api/v4/user")
+	if err != nil {
+		return Account{}, fmt.Errorf("gitlab: build endpoint: %w", err)
+	}
+	client, err := httptransport.NewRestrictedClient(endpoint, 15*time.Second, options.AllowPrivate)
+	if err != nil {
+		return Account{}, fmt.Errorf("gitlab: build client: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return Account{}, fmt.Errorf("gitlab: build request: %w", err)
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Account{}, fmt.Errorf("gitlab: request: %w", err)
 	}

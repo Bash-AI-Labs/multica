@@ -3,11 +3,14 @@ package service
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
+	"io"
 	"mime"
 	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"os"
 	"strings"
@@ -258,6 +261,17 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 	if strings.TrimSpace(s.fromEmail) == "" {
 		return fmt.Errorf("SMTP_FROM_EMAIL or RESEND_FROM_EMAIL is required when SMTP_HOST is set")
 	}
+	fromAddress, err := parseMailboxAddress(s.fromEmail)
+	if err != nil {
+		return fmt.Errorf("invalid SMTP sender address: %w", err)
+	}
+	toAddress, err := parseMailboxAddress(to)
+	if err != nil {
+		return fmt.Errorf("invalid SMTP recipient address: %w", err)
+	}
+	if strings.ContainsAny(subject, "\r\n") {
+		return errors.New("SMTP subject must not contain CR or LF")
+	}
 
 	c, err := s.openSMTPClient()
 	if err != nil {
@@ -290,7 +304,8 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 	// non-ASCII workspace/inviter names crossing strict or older SMTP hops.
 	has8Bit, _ := c.Extension("8BITMIME")
 	encodedSubject := mime.QEncoding.Encode("utf-8", subject)
-	msgID := fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), s.smtpHost)
+	at := strings.LastIndexByte(fromAddress.Address, '@')
+	msgID := fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), fromAddress.Address[at+1:])
 
 	var bodyBytes []byte
 	var cte string
@@ -306,18 +321,18 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 		cte = "quoted-printable"
 	}
 
-	if err = c.Mail(s.fromEmail); err != nil {
+	if err = c.Mail(fromAddress.Address); err != nil {
 		return fmt.Errorf("smtp MAIL FROM: %w", err)
 	}
-	if err = c.Rcpt(to); err != nil {
-		return fmt.Errorf("smtp RCPT TO <%s>: %w", to, err)
+	if err = c.Rcpt(toAddress.Address); err != nil {
+		return fmt.Errorf("smtp RCPT TO <%s>: %w", toAddress.Address, err)
 	}
 	w, err := c.Data()
 	if err != nil {
 		return fmt.Errorf("smtp DATA: %w", err)
 	}
-	headers := "From: " + s.fromEmail + "\r\n" +
-		"To: " + to + "\r\n" +
+	headers := "From: " + fromAddress.String() + "\r\n" +
+		"To: " + toAddress.String() + "\r\n" +
 		"Subject: " + encodedSubject + "\r\n" +
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
 		"Message-ID: " + msgID + "\r\n" +
@@ -325,13 +340,32 @@ func (s *EmailService) sendSMTP(to, subject, htmlBody string) error {
 		"Content-Type: text/html; charset=UTF-8\r\n" +
 		"Content-Transfer-Encoding: " + cte + "\r\n" +
 		"\r\n"
-	if _, err = fmt.Fprintf(w, "%s%s", headers, bodyBytes); err != nil {
+	if _, err = io.WriteString(w, headers); err != nil {
+		return fmt.Errorf("smtp write headers: %w", err)
+	}
+	if _, err = w.Write(bodyBytes); err != nil {
 		return fmt.Errorf("smtp write body: %w", err)
 	}
 	if err = w.Close(); err != nil {
 		return fmt.Errorf("smtp end data: %w", err)
 	}
 	return c.Quit()
+}
+
+func parseMailboxAddress(raw string) (*mail.Address, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, "\r\n") {
+		return nil, errors.New("address is empty or contains CR or LF")
+	}
+	address, err := mail.ParseAddress(raw)
+	if err != nil || strings.ContainsAny(address.Address, "\r\n") {
+		return nil, errors.New("address is not a valid mailbox")
+	}
+	at := strings.LastIndexByte(address.Address, '@')
+	if at <= 0 || at == len(address.Address)-1 {
+		return nil, errors.New("address must contain a local part and domain")
+	}
+	return address, nil
 }
 
 // SendVerificationCode sends a one-time login code. The code is server-generated

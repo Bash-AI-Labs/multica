@@ -26,6 +26,15 @@ func vcsHandlerRequest(method, path string, body any, connectionID string) *http
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 }
 
+func withVCSPrivateURL(t *testing.T, rawURL string) {
+	t.Helper()
+	original := testHandler.cfg.VCSPrivateURLs
+	testHandler.cfg.VCSPrivateURLs = []string{rawURL}
+	t.Cleanup(func() {
+		testHandler.cfg.VCSPrivateURLs = original
+	})
+}
+
 func TestListVCSConnectionsHonorsDeploymentSwitch(t *testing.T) {
 	ctx := context.Background()
 	box := withVCSBox(t)
@@ -83,6 +92,7 @@ func TestConnectVCSHonorsDeploymentSwitch(t *testing.T) {
 		_, _ = w.Write([]byte(`{"login":"vcs-test-user"}`))
 	}))
 	defer provider.Close()
+	withVCSPrivateURL(t, provider.URL)
 
 	withVCSBox(t)
 	t.Cleanup(func() { cleanupVCS(context.Background(), "") })
@@ -190,6 +200,7 @@ func TestConnectVCSReportsUntrustedCertificate(t *testing.T) {
 		_, _ = w.Write([]byte(`{"login":"vcs-test-user"}`))
 	}))
 	defer provider.Close()
+	withVCSPrivateURL(t, provider.URL)
 
 	withVCSBox(t)
 	t.Cleanup(func() { cleanupVCS(context.Background(), "") })
