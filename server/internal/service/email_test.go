@@ -267,6 +267,53 @@ func TestSendSMTPRequiresConfiguredFromEmail(t *testing.T) {
 	}
 }
 
+func TestParseMailboxAddressRejectsHeaderInjection(t *testing.T) {
+	for _, raw := range []string{
+		"victim@example.com\r\nBcc: attacker@example.com",
+		"victim@example.com\nX-Test: injected",
+		"not-an-address",
+		"local-only",
+	} {
+		if _, err := parseMailboxAddress(raw); err == nil {
+			t.Errorf("parseMailboxAddress(%q) succeeded", raw)
+		}
+	}
+	address, err := parseMailboxAddress(`Multica Team <noreply@example.com>`)
+	if err != nil {
+		t.Fatalf("valid mailbox rejected: %v", err)
+	}
+	if address.Address != "noreply@example.com" {
+		t.Fatalf("mailbox address = %q", address.Address)
+	}
+}
+
+func TestSendSMTPRejectsInjectedHeadersBeforeDial(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    string
+		to      string
+		subject string
+		want    string
+	}{
+		{"from", "from@example.com\r\nBcc: attacker@example.com", "to@example.com", "Subject", "invalid SMTP sender address"},
+		{"to", "from@example.com", "to@example.com\r\nBcc: attacker@example.com", "Subject", "invalid SMTP recipient address"},
+		{"subject", "from@example.com", "to@example.com", "Subject\r\nBcc: attacker@example.com", "SMTP subject must not contain CR or LF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &EmailService{
+				fromEmail: tc.from,
+				smtpHost:  "127.0.0.1",
+				smtpPort:  "1",
+			}
+			err := s.sendSMTP(tc.to, tc.subject, "<p>body</p>")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("sendSMTP error = %v, want %q before dialing", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildInvitationParams_EscapesHTMLInBody(t *testing.T) {
 	tests := []struct {
 		name          string

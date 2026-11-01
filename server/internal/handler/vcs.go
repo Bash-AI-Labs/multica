@@ -10,7 +10,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -182,19 +181,21 @@ func (h *Handler) ConnectVCS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported provider")
 		return
 	}
-	instanceURL := vcs.NormalizeInstanceURL(req.InstanceURL)
 	token := strings.TrimSpace(req.AccessToken)
-	if instanceURL == "" || token == "" {
+	if strings.TrimSpace(req.InstanceURL) == "" || token == "" {
 		writeError(w, http.StatusBadRequest, "instance_url and access_token are required")
 		return
 	}
-	parsed, err := url.Parse(instanceURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		writeError(w, http.StatusBadRequest, "instance_url must be an absolute http(s) URL")
+	parsed, err := vcs.ParseInstanceURL(req.InstanceURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "instance_url must be an absolute http(s) URL without userinfo, query, or fragment")
 		return
 	}
+	instanceURL := parsed.String()
 
-	account, err := provider.ValidateToken(r.Context(), instanceURL, token)
+	account, err := provider.ValidateToken(r.Context(), instanceURL, token, vcs.ValidationOptions{
+		AllowPrivate: vcs.PrivateNetworkAllowed(instanceURL, h.cfg.VCSPrivateURLs),
+	})
 	if err != nil {
 		if errors.Is(err, vcs.ErrUnauthorized) {
 			writeError(w, http.StatusBadRequest, "the provider rejected the access token")

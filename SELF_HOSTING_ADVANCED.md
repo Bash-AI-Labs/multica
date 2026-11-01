@@ -217,6 +217,25 @@ into its own read-only directory and list it after the system directory:
 SSL_CERT_DIR=/etc/ssl/certs:/etc/multica/ca-certs
 ```
 
+#### Private-network Git providers
+
+Forgejo, Gitea, and GitLab connection checks refuse addresses on loopback,
+RFC1918, link-local/metadata, Tailscale/CGNAT, Docker, and IPv6 private ranges
+by default. This protects the backend network even though workspace owners and
+admins may choose the provider URL.
+
+When the provider intentionally lives on a private network, the deployment
+operator must allow its exact base URL:
+
+```dotenv
+MULTICA_VCS_PRIVATE_URLS=https://gitlab.internal,https://forgejo.internal:3000/git
+```
+
+The value is a comma-separated list. Scheme, hostname, port, and base path must
+match exactly. The client remains pinned to that hostname at dial time, ignores
+ambient HTTP proxy settings, and does not follow redirects. Keep the list empty
+for public providers.
+
 **Kubernetes (Helm):** create a ConfigMap whose keys are PEM files, then point
 `backend.extraCACerts.configMap` at it. The chart mounts it at
 `/etc/multica/ca-certs` and sets `SSL_CERT_DIR` as above.

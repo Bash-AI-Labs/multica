@@ -178,9 +178,14 @@ func TestConfigFieldsForManifestKeepsDeclarationOrder(t *testing.T) {
 // an API caller. The directory name arrives over HTTP, so it must not be able to
 // escape MULTICA_PLUGIN_DIR or name a dotfile path.
 func TestReadLocalFileStaysInsideThePluginDirectory(t *testing.T) {
-	root := t.TempDir()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "plugins")
+	outside := filepath.Join(sandbox, "outside")
 	if err := os.MkdirAll(filepath.Join(root, "hello"), 0o755); err != nil {
 		t.Fatalf("create local plugin dir: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("create outside dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "hello", plugincontract.ManifestFilename), []byte(testManifestJSON), 0o644); err != nil {
 		t.Fatalf("write local manifest: %v", err)
@@ -188,6 +193,18 @@ func TestReadLocalFileStaysInsideThePluginDirectory(t *testing.T) {
 	// A file the caller must not be able to reach by naming a traversing entry.
 	if err := os.WriteFile(filepath.Join(root, "secret.txt"), []byte("nope"), 0o644); err != nil {
 		t.Fatalf("write sibling file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "secret.txt"), filepath.Join(root, "hello", "sibling-link.txt")); err != nil {
+		t.Fatalf("create sibling symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "hello", "outside-link.txt")); err != nil {
+		t.Fatalf("create outside symlink: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked-plugin")); err != nil {
+		t.Fatalf("create plugin directory symlink: %v", err)
 	}
 	service := &PluginService{LocalDir: root}
 
@@ -212,6 +229,14 @@ func TestReadLocalFileStaysInsideThePluginDirectory(t *testing.T) {
 	}
 	if _, err := service.readLocalFile("hello", "../secret.txt"); err == nil {
 		t.Fatal("readLocalFile followed a traversing entry out of the plugin directory")
+	}
+	for _, entry := range []string{"sibling-link.txt", "outside-link.txt"} {
+		if _, err := service.readLocalFile("hello", entry); err == nil {
+			t.Fatalf("readLocalFile followed symlink %q out of the plugin directory", entry)
+		}
+	}
+	if _, err := service.readLocalFile("linked-plugin", "secret.txt"); err == nil {
+		t.Fatal("readLocalFile followed a plugin directory symlink outside MULTICA_PLUGIN_DIR")
 	}
 
 	disabled := &PluginService{}

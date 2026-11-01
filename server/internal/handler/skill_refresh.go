@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,7 +191,7 @@ func (h *Handler) RefreshSkill(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errSkillOverwriteForbidden):
 			writeError(w, http.StatusForbidden, "only the skill creator or a workspace admin can update this skill from its source")
 		case errors.Is(err, errSkillOverwriteNameConflict):
-			writeError(w, http.StatusConflict, "a skill named \""+newName+"\" already exists in this workspace")
+			writeError(w, http.StatusConflict, "a skill named "+strconv.Quote(newName)+" already exists in this workspace")
 		default:
 			slog.Warn("update skill from source failed", append(logger.RequestAttrs(r), "error", err)...)
 			writeError(w, http.StatusInternalServerError, "failed to update skill from source")

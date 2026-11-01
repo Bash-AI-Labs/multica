@@ -299,6 +299,45 @@ func TestServeAvatar_PresignRedirects(t *testing.T) {
 	}
 }
 
+type offOriginAvatarPresigner struct {
+	mockStorageNoCdn
+}
+
+func (s *offOriginAvatarPresigner) PresignGetWithContentDisposition(context.Context, string, time.Duration, string) (string, error) {
+	return "https://attacker.example/avatar.png?X-Amz-Signature=mock", nil
+}
+
+func TestServeAvatar_RejectsOffOriginPresignedRedirect(t *testing.T) {
+	withAvatarStorage(t, &offOriginAvatarPresigner{}, "")
+	key := seedAvatarObject(t, avatarObjectOpts{})
+
+	w := serveAvatarRequest(t, signAvatarKey(key), key)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+	if location := w.Header().Get("Location"); location != "" {
+		t.Fatalf("Location = %q, want no redirect", location)
+	}
+}
+
+func TestValidateAvatarRedirectURLRequiresStorageOrigin(t *testing.T) {
+	objectURL := "https://storage.example/bucket/avatar.png"
+	valid := "https://storage.example/bucket/avatar.png?X-Amz-Signature=ok"
+	if got, err := validateAvatarRedirectURL(valid, objectURL); err != nil || got != valid {
+		t.Fatalf("valid redirect = %q, %v", got, err)
+	}
+	for _, raw := range []string{
+		"https://attacker.example/avatar.png",
+		"http://storage.example/avatar.png",
+		"https://user@storage.example/avatar.png",
+		"//storage.example/avatar.png",
+	} {
+		if _, err := validateAvatarRedirectURL(raw, objectURL); err == nil {
+			t.Errorf("validateAvatarRedirectURL(%q) succeeded", raw)
+		}
+	}
+}
+
 // TestServeAvatar_RejectsForgedSignature — the signature is the credential;
 // without it the endpoint must not reach storage at all.
 func TestServeAvatar_RejectsForgedSignature(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -213,7 +214,7 @@ func TestRefreshSkill_UpstreamRenameCollisionReturns409(t *testing.T) {
 
 	slug := fmt.Sprintf("refresh-collision-%d", time.Now().UnixNano())
 	oldName := slug + "-old"
-	takenName := slug + "-taken"
+	takenName := slug + `-"taken"`
 	skillID := createImportTargetSkillWithConfig(t, oldName, testUserID, clawhubOriginConfig(slug), nil)
 	createImportTargetSkill(t, takenName, testUserID, nil)
 
@@ -222,6 +223,15 @@ func TestRefreshSkill_UpstreamRenameCollisionReturns409(t *testing.T) {
 	w := doRefreshSkill(t, testUserID, skillID)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("conflict response is not valid JSON: %v", err)
+	}
+	if response.Error != "a skill named "+strconv.Quote(takenName)+" already exists in this workspace" {
+		t.Fatalf("unexpected conflict error: %q", response.Error)
 	}
 	// Whole refresh rolled back: name, description, and content unchanged.
 	name, desc, content, _ := getSkillRow(t, skillID)

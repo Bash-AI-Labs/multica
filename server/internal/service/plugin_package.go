@@ -499,8 +499,8 @@ func (s *PluginService) packageFile(ctx context.Context, queries *db.Queries, ve
 //
 // `entry` is validated by the contract package to be relative and
 // traversal-free, but this is the layer that touches the filesystem and it does
-// not get to assume that: the joined path is re-checked against the plugin's own
-// directory after cleaning.
+// not get to assume that. os.Root confines both the plugin directory and its
+// entries even when either path contains a symlink.
 func (s *PluginService) readLocalFile(name, entry string) ([]byte, error) {
 	if s.LocalDir == "" {
 		return nil, pluginErrf(PluginErrorInvalid, "local plugin sources require MULTICA_PLUGIN_DIR")
@@ -508,12 +508,23 @@ func (s *PluginService) readLocalFile(name, entry string) ([]byte, error) {
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.HasPrefix(name, ".") {
 		return nil, pluginErrf(PluginErrorInvalid, "local plugin source must be a single directory name under MULTICA_PLUGIN_DIR")
 	}
-	root := filepath.Join(s.LocalDir, name)
-	path := filepath.Clean(filepath.Join(root, entry))
-	if path != root && !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+	if entry == "" || entry == "." || !filepath.IsLocal(entry) || strings.Contains(entry, `\`) {
 		return nil, pluginErrf(PluginErrorInvalid, "plugin resource %q escapes its directory", entry)
 	}
-	raw, err := os.ReadFile(path)
+	localRoot, err := os.OpenRoot(s.LocalDir)
+	if err != nil {
+		return nil, &PluginError{Kind: PluginErrorInvalid, Message: "open local plugin directory", Err: err}
+	}
+	defer func() { _ = localRoot.Close() }()
+	pluginRoot, err := localRoot.OpenRoot(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, pluginErrf(PluginErrorNotFound, "local plugin source %q was not found", name)
+	}
+	if err != nil {
+		return nil, &PluginError{Kind: PluginErrorInvalid, Message: "open local plugin source", Err: err}
+	}
+	defer func() { _ = pluginRoot.Close() }()
+	raw, err := pluginRoot.ReadFile(entry)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, pluginErrf(PluginErrorNotFound, "plugin resource %q was not found", entry)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/qoderruntime"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/httptransport"
 )
 
 const qoderAPIURL = "https://api.qoder.com/api/v1/cloud"
@@ -38,9 +39,41 @@ type qoderCatalogItem struct {
 	Name string `json:"name"`
 }
 
+func newQoderHTTPClient(baseURL string) (*url.URL, *http.Client, error) {
+	baseURL, ok := qoderBaseURL(baseURL)
+	if !ok {
+		return nil, nil, errors.New("unsupported Qoder Cloud Agents API URL")
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, nil, errors.New("invalid Qoder Cloud Agents API URL")
+	}
+	client, err := httptransport.NewRestrictedClient(base, 15*time.Second, false)
+	if err != nil {
+		return nil, nil, errors.New("invalid Qoder Cloud Agents API URL")
+	}
+	return base, client, nil
+}
+
+func qoderEndpoint(base *url.URL, suffix string) *url.URL {
+	endpoint := *base
+	endpoint.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(suffix, "/")
+	endpoint.RawPath = ""
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+	return &endpoint
+}
+
 // Only names and identifiers leave the server. Provider configurations may contain secrets.
 func fetchQoderCatalog(ctx context.Context, baseURL, token, kind string) ([]qoderCatalogItem, error) {
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	base, client, err := newQoderHTTPClient(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	return fetchQoderCatalogWithClient(ctx, client, base, token, kind)
+}
+
+func fetchQoderCatalogWithClient(ctx context.Context, client *http.Client, base *url.URL, token, kind string) ([]qoderCatalogItem, error) {
 	items := []qoderCatalogItem{}
 	cursor := ""
 	seen := map[string]bool{}
@@ -51,7 +84,9 @@ func fetchQoderCatalog(ctx context.Context, baseURL, token, kind string) ([]qode
 		if cursor != "" {
 			query.Set("after_id", cursor)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/"+kind+"?"+query.Encode(), nil)
+		endpoint := qoderEndpoint(base, kind)
+		endpoint.RawQuery = query.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("invalid Qoder Cloud Agents catalog request")
 		}

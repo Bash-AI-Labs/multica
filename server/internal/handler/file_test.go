@@ -138,7 +138,7 @@ func (m *mockStorage) PresignGet(_ context.Context, key string, _ time.Duration)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.presignCalls = append(m.presignCalls, key)
-	return "https://signed.example.com/" + key + "?X-Amz-Signature=mock", nil
+	return "https://cdn.example.com/" + key + "?X-Amz-Signature=mock", nil
 }
 func (m *mockStorage) PresignGetWithContentDisposition(_ context.Context, key string, _ time.Duration, contentDisposition string) (string, error) {
 	m.mu.Lock()
@@ -147,7 +147,7 @@ func (m *mockStorage) PresignGetWithContentDisposition(_ context.Context, key st
 	m.presignDispositions = append(m.presignDispositions, contentDisposition)
 	u := url.URL{
 		Scheme: "https",
-		Host:   "signed.example.com",
+		Host:   "cdn.example.com",
 		Path:   "/" + key,
 	}
 	q := u.Query()

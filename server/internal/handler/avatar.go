@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -367,8 +368,14 @@ func (h *Handler) ServeAvatar(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "cloudfront avatar downloads are not configured")
 			return
 		}
+		redirectURL, err := validateAvatarRedirectURL(h.CFSigner.SignedURL(objectURL, time.Now().Add(h.attachmentDownloadURLTTL())), objectURL)
+		if err != nil {
+			slog.Error("refusing invalid cloudfront avatar redirect", "key", key, "error", err)
+			writeError(w, http.StatusBadGateway, "failed to create avatar URL")
+			return
+		}
 		setAvatarCacheControl(w, h.avatarRedirectMaxAge())
-		http.Redirect(w, r, h.CFSigner.SignedURL(objectURL, time.Now().Add(h.attachmentDownloadURLTTL())), http.StatusFound)
+		http.Redirect(w, r, redirectURL, http.StatusFound)
 	case attachmentDownloadModePresign:
 		presigner, ok := h.Storage.(storage.DownloadPresigner)
 		if !ok {
@@ -384,6 +391,12 @@ func (h *Handler) ServeAvatar(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "failed to create avatar URL")
 			return
 		}
+		signedURL, err = validateAvatarRedirectURL(signedURL, objectURL)
+		if err != nil {
+			slog.Error("refusing invalid presigned avatar redirect", "key", key, "error", err)
+			writeError(w, http.StatusBadGateway, "failed to create avatar URL")
+			return
+		}
 		setAvatarCacheControl(w, h.avatarRedirectMaxAge())
 		http.Redirect(w, r, signedURL, http.StatusFound)
 	case attachmentDownloadModeProxy:
@@ -391,6 +404,23 @@ func (h *Handler) ServeAvatar(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusInternalServerError, "invalid attachment download mode")
 	}
+}
+
+func validateAvatarRedirectURL(rawURL, objectURL string) (string, error) {
+	target, err := url.Parse(rawURL)
+	if err != nil || target.Host == "" || target.User != nil || target.Fragment != "" ||
+		(target.Scheme != "https" && target.Scheme != "http") {
+		return "", errors.New("avatar redirect must be an absolute HTTP(S) URL without userinfo or fragment")
+	}
+	expected, err := url.Parse(objectURL)
+	if err != nil || expected.Host == "" || expected.User != nil ||
+		(expected.Scheme != "https" && expected.Scheme != "http") {
+		return "", errors.New("avatar storage URL is invalid")
+	}
+	if !strings.EqualFold(target.Scheme, expected.Scheme) || !strings.EqualFold(target.Host, expected.Host) {
+		return "", errors.New("avatar redirect changed the configured storage origin")
+	}
+	return target.String(), nil
 }
 
 // proxyAvatar streams the object through the API for backends that cannot be
