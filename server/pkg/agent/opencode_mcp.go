@@ -134,7 +134,7 @@ func translateMCPConfigForOpenCode(raw json.RawMessage) (map[string]any, error) 
 		return validateOpenCodeNativeMCPMap(payload.MCP)
 	}
 
-	servers := make(map[string]any, len(payload.MCPServers)+len(payload.MCP))
+	servers := make(map[string]any)
 	for name, rawEntry := range payload.MCP {
 		validated, err := validateOpenCodeNativeMCPEntry(name, rawEntry)
 		if err != nil {

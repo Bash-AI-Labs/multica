@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -97,6 +98,18 @@ func listDeliveries(t *testing.T, apID string) []map[string]any {
 		t.Fatalf("decode: %v", err)
 	}
 	return resp.Deliveries
+}
+
+func TestListAutopilotDeliveriesHandlesOutOfRangePagination(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	agentID := createWebhookTestAgent(t, "Delivery Pagination Agent")
+	apID := createWebhookTestAutopilot(t, agentID, "active", "run_only")
+
+	req := newRequest("GET", "/api/autopilots/"+apID+"/deliveries?limit=2147483648&offset=2147483648", nil)
+	req = withURLParam(req, "id", apID)
+	testutil.Call(t, testHandler.ListAutopilotDeliveries, req).Want(http.StatusOK)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

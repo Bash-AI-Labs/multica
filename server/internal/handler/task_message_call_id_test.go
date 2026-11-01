@@ -91,6 +91,20 @@ func TestTaskMessageCallIDLiveAndHistory(t *testing.T) {
 			})
 		}
 	}
+	for _, reader := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"daemon", h.ListTaskMessages}, {"user", h.ListTaskMessagesByUser},
+	} {
+		t.Run(reader.name+" rejects out-of-range since", func(t *testing.T) {
+			req := testutil.JSONRequest(http.MethodGet, "/api/tasks/"+taskID+"/messages?since=2147483648", nil)
+			req = testutil.WithURLParams(req, "taskId", taskID)
+			req.Header.Set("X-User-ID", testUserID)
+			ctx := middleware.SetMemberContext(req.Context(), testWorkspaceID, db.Member{})
+			testutil.Call(t, reader.handler, req.WithContext(ctx)).Want(http.StatusBadRequest)
+		})
+	}
 	// The single-row writer is also used outside daemon batch ingestion.
 	row, err := h.Queries.CreateTaskMessage(context.Background(), db.CreateTaskMessageParams{
 		ID:     pgtype.UUID{Bytes: uuid.Must(uuid.NewV7()), Valid: true},

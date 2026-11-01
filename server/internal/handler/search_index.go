@@ -315,14 +315,14 @@ func (h *Handler) GetSearchIndexSnapshot(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	afterNumber := int64(0)
+	afterNumber := int32(0)
 	if raw := r.URL.Query().Get("after_number"); raw != "" {
 		v, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil || v < 0 {
 			writeError(w, http.StatusBadRequest, "invalid after_number")
 			return
 		}
-		afterNumber = v
+		afterNumber = int32(v)
 	}
 	limit := searchIndexSnapshotDefaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -349,7 +349,7 @@ func (h *Handler) GetSearchIndexSnapshot(w http.ResponseWriter, r *http.Request)
 		var err error
 		issues, err = q.ListSearchIndexIssuesPage(ctx, db.ListSearchIndexIssuesPageParams{
 			WorkspaceID: wsUUID,
-			AfterNumber: int32(afterNumber),
+			AfterNumber: afterNumber,
 			PageLimit:   int32(limit),
 		})
 		if err != nil {

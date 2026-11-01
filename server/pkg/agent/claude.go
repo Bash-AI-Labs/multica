@@ -1330,7 +1330,7 @@ func envHasSandbox(env []string) bool {
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {
-	env := make([]string, 0, len(base)+len(extra))
+	env := make([]string, 0)
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
 		// MULTICA_* in the daemon's own environment is not task context. Drop

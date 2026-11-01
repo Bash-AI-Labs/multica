@@ -252,6 +252,8 @@ func TestListComments_TimestampParamsAcceptSecondPrecision(t *testing.T) {
 	}{
 		{"since", "since=2026-01-02+03:04:05", "invalid since parameter"},
 		{"before", cursorQuery(1, "2026-01-02T03:04", fx.Root1), "invalid before parameter"},
+		{"recent overflow", "recent=2147483648", "invalid recent parameter"},
+		{"tail overflow", "thread=" + fx.Root1 + "&tail=2147483648", "invalid tail parameter"},
 	} {
 		w, _ := listComments(t, fx.IssueID, tc.query)
 		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.wantMessage) {

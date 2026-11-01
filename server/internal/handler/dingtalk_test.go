@@ -413,6 +413,9 @@ func TestListDingTalkGroupsInactivePaginationAuthorizesInstallationBeforeCursor(
 		return testutil.WithURLParams(newRequestAs(userID, http.MethodGet, path, nil), "id", testWorkspaceID)
 	}
 
+	testutil.Call(t, testHandler.ListDingTalkGroups,
+		request(agentOwnerID, installationID, "&limit=1&offset=2147483648")).Want(http.StatusBadRequest)
+
 	inaccessible := testutil.Call(t, testHandler.ListDingTalkGroups,
 		request(unrelatedMemberID, installationID, "&limit=1&offset=0")).Want(http.StatusOK)
 	var inaccessibleBody ListDingTalkGroupsResponse

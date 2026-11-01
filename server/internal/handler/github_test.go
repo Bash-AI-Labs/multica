@@ -82,6 +82,24 @@ func TestExtractIdentifiers(t *testing.T) {
 	}
 }
 
+func TestIssueNumberForPrefixRejectsOutOfRangeNumber(t *testing.T) {
+	tests := []struct {
+		identifier string
+		want       int32
+		ok         bool
+	}{
+		{identifier: "MUL-2147483647", want: 2147483647, ok: true},
+		{identifier: "MUL-2147483648", ok: false},
+		{identifier: "MUL--2147483649", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := issueNumberForPrefix(tt.identifier, "MUL")
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("issueNumberForPrefix(%q) = (%d, %v), want (%d, %v)", tt.identifier, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 func TestExtractClosingIdentifiers(t *testing.T) {
 	cases := []struct {
 		name string

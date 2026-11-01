@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -1083,6 +1084,18 @@ func TestGetAutopilotRun_ReturnsFullPayload(t *testing.T) {
 	if !strings.Contains(wDetail.Body.String(), `"answer":42`) {
 		t.Fatalf("detail response should carry full trigger_payload, body=%s", wDetail.Body.String())
 	}
+}
+
+func TestListAutopilotRunsHandlesOutOfRangePagination(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	agentID := createWebhookTestAgent(t, "Webhook Pagination Agent")
+	apID := createWebhookTestAutopilot(t, agentID, "active", "run_only")
+
+	req := newRequest("GET", "/api/autopilots/"+apID+"/runs?limit=2147483648&offset=2147483648", nil)
+	req = withURLParam(req, "id", apID)
+	testutil.Call(t, testHandler.ListAutopilotRuns, req).Want(http.StatusOK)
 }
 
 // NOTE: the cross-workspace paranoia branch in autopilot_webhook.go
