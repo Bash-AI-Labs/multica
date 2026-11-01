@@ -326,12 +326,12 @@ func (h *Handler) GetSearchIndexSnapshot(w http.ResponseWriter, r *http.Request)
 	}
 	limit := searchIndexSnapshotDefaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
-		v, err := strconv.Atoi(raw)
+		v, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil || v <= 0 {
 			writeError(w, http.StatusBadRequest, "invalid limit")
 			return
 		}
-		limit = min(v, searchIndexSnapshotMaxLimit)
+		limit = min(int(v), searchIndexSnapshotMaxLimit)
 	}
 	release, ok := acquireSearchIndexBootstrapSlot(ctx)
 	if !ok {
