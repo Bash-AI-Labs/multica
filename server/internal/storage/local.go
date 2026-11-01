@@ -142,20 +142,35 @@ func (s *LocalStorage) KeyFromURL(rawURL string) string {
 	return rawURL
 }
 
+// resolve validates an object key and returns its path below uploadDir.
+// filepath.IsLocal treats backslashes as ordinary filename characters on
+// Unix; that is intentional because only the platform path separator can
+// traverse directories.
+func (s *LocalStorage) resolve(key string) (string, error) {
+	if key == "" || !filepath.IsLocal(key) {
+		return "", fmt.Errorf("local storage: invalid key %q", key)
+	}
+
+	root := filepath.Clean(s.uploadDir)
+	target := filepath.Join(root, key)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("local storage: key escapes upload dir: %q", key)
+	}
+	return target, nil
+}
+
 // GetReader opens the underlying file for streaming. Refuses keys that
 // resolve outside uploadDir (defense against a stored key with traversal
 // components) and refuses the sidecar suffix so /content can't be coaxed
 // into leaking the .meta.json blob.
 func (s *LocalStorage) GetReader(ctx context.Context, key string) (io.ReadCloser, error) {
-	if key == "" {
-		return nil, fmt.Errorf("local GetReader: empty key")
-	}
 	if isInternalLocalPath(key) {
 		return nil, fmt.Errorf("local GetReader: refusing to serve internal key %q", key)
 	}
-	filePath := filepath.Join(s.uploadDir, key)
-	if !isUnder(s.uploadDir, filePath) {
-		return nil, fmt.Errorf("local GetReader: key escapes upload dir: %q", key)
+	filePath, err := s.resolve(key)
+	if err != nil {
+		return nil, fmt.Errorf("local GetReader: %w", err)
 	}
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -180,7 +195,10 @@ func (s *LocalStorage) DeleteObject(_ context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-	filePath := filepath.Join(s.uploadDir, key)
+	filePath, err := s.resolve(key)
+	if err != nil {
+		return fmt.Errorf("local storage DeleteObject: %w", err)
+	}
 	for _, p := range []string{filePath, filePath + metaSuffix, tempPath(filePath)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
@@ -203,8 +221,8 @@ func (s *LocalStorage) DeleteKeys(ctx context.Context, keys []string) {
 }
 
 func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {
-	dest := filepath.Join(s.uploadDir, key)
-	if err := writeAtomic(dest, bytes.NewReader(data)); err != nil {
+	dest, err := s.writeAtomic(key, bytes.NewReader(data))
+	if err != nil {
 		return "", err
 	}
 	// Best-effort sidecar so ServeFile can restore the original filename in
@@ -224,8 +242,8 @@ func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, cont
 }
 
 func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Reader, _ int64, contentType string, filename string) (string, error) {
-	dest := filepath.Join(s.uploadDir, key)
-	if err := writeAtomic(dest, data); err != nil {
+	dest, err := s.writeAtomic(key, data)
+	if err != nil {
 		return "", err
 	}
 	if filename != "" {
@@ -246,31 +264,35 @@ func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Rea
 // longer exists. With rename-into-place a failed write only discards its own
 // temp file and the existing object survives untouched. Both upload paths go
 // through here so neither can reintroduce the destructive shape.
-func writeAtomic(dest string, src io.Reader) error {
+func (s *LocalStorage) writeAtomic(key string, src io.Reader) (string, error) {
+	dest, err := s.resolve(key)
+	if err != nil {
+		return "", fmt.Errorf("local storage write: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return fmt.Errorf("local storage MkdirAll: %w", err)
+		return "", fmt.Errorf("local storage MkdirAll: %w", err)
 	}
 	tmp := tempPath(dest)
 	// 0644 at open, matching the mode the direct write used (os.CreateTemp
 	// would make it 0600 and need a chmod that some mounts refuse).
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return fmt.Errorf("local storage create temp: %w", err)
+		return "", fmt.Errorf("local storage create temp: %w", err)
 	}
 	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return fmt.Errorf("local storage stream copy: %w", err)
+		return "", fmt.Errorf("local storage stream copy: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("local storage Close: %w", err)
+		return "", fmt.Errorf("local storage Close: %w", err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("local storage Rename: %w", err)
+		return "", fmt.Errorf("local storage Rename: %w", err)
 	}
-	return nil
+	return dest, nil
 }
 
 // tempPath is the staging file writeAtomic renames into place. It is derived
@@ -304,8 +326,8 @@ func isInternalLocalPath(key string) bool {
 	return strings.HasPrefix(base, ".") && strings.HasSuffix(base, tempSuffix)
 }
 
-func (s *LocalStorage) GetFilePath(key string) string {
-	return filepath.Join(s.uploadDir, key)
+func (s *LocalStorage) GetFilePath(key string) (string, error) {
+	return s.resolve(key)
 }
 
 func (s *LocalStorage) ServeFile(w http.ResponseWriter, r *http.Request, filename string) {
@@ -319,13 +341,8 @@ func (s *LocalStorage) ServeFile(w http.ResponseWriter, r *http.Request, filenam
 		return
 	}
 
-	filePath := filepath.Join(s.uploadDir, filename)
-	// filepath.Join cleans the path but doesn't enforce containment, so a
-	// caller passing "../etc/passwd" lands outside uploadDir. http.ServeFile
-	// rejects such requests on r.URL.Path, but readLocalMeta runs first —
-	// without this guard a crafted path could trigger a stray disk read on
-	// an arbitrary <some-path>.meta.json before the 400 lands.
-	if !isUnder(s.uploadDir, filePath) {
+	filePath, err := s.resolve(filename)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -337,7 +354,7 @@ func (s *LocalStorage) ServeFile(w http.ResponseWriter, r *http.Request, filenam
 	// UUID + extension) instead of the human-readable name the uploader
 	// chose. Uploads from before the sidecar landed have no .meta.json on
 	// disk and fall through to the existing behavior.
-	if meta, ok := readLocalMeta(filePath); ok && meta.Filename != "" {
+	if meta, ok := s.readLocalMeta(filename); ok && meta.Filename != "" {
 		w.Header().Set("Content-Disposition", ContentDisposition(meta.ContentType, meta.Filename))
 	}
 
@@ -346,18 +363,11 @@ func (s *LocalStorage) ServeFile(w http.ResponseWriter, r *http.Request, filenam
 	http.ServeFile(w, r, filePath)
 }
 
-// isUnder reports whether target resolves to a path inside dir (or equal to
-// it). Both inputs are passed through filepath.Clean so trailing slashes and
-// "." segments don't fool the comparison.
-func isUnder(dir, target string) bool {
-	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(target))
+func (s *LocalStorage) readLocalMeta(key string) (localMeta, bool) {
+	filePath, err := s.resolve(key)
 	if err != nil {
-		return false
+		return localMeta{}, false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func readLocalMeta(filePath string) (localMeta, bool) {
 	body, err := os.ReadFile(filePath + metaSuffix)
 	if err != nil {
 		return localMeta{}, false
@@ -370,6 +380,9 @@ func readLocalMeta(filePath string) (localMeta, bool) {
 }
 
 func (s *LocalStorage) UploadFromReader(ctx context.Context, key string, reader io.Reader, contentType string, filename string) (string, error) {
+	if _, err := s.resolve(key); err != nil {
+		return "", fmt.Errorf("local storage UploadFromReader: %w", err)
+	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return "", fmt.Errorf("local storage ReadAll: %w", err)

@@ -227,6 +227,31 @@ func TestAuth_TaskTokenWorkspaceSelectors(t *testing.T) {
 	}
 }
 
+func TestAuth_TaskTokenWorkspaceSelectorLogOmitsValue(t *testing.T) {
+	logs := withCapturedLogs(t)
+	const rejectedValue = "0c0c0c0c-0000-4000-8000-00000000000c"
+
+	handler := Auth(db.New(&fakeTaskTokenDB{t: t}), nil, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler must not run when selector conflicts")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+ttTestToken)
+	req.Header.Set("X-Workspace-ID", rejectedValue)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	got := logs.String()
+	if strings.Contains(got, rejectedValue) {
+		t.Fatalf("rejected header value leaked into logs: %s", got)
+	}
+	if !strings.Contains(got, "selector=header:X-Workspace-ID") {
+		t.Fatalf("log omitted non-sensitive selector identifier: %s", got)
+	}
+}
+
 // TestAuth_JWTWorkspaceSelectorUntouched is the control for the task-token
 // check: human JWT sessions keep choosing their workspace through headers,
 // and Auth must neither validate nor rewrite that choice.

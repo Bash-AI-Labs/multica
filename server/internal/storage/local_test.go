@@ -487,6 +487,89 @@ func TestLocalStorage_GetReader_RejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestLocalStorage_RejectsNonLocalKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LOCAL_UPLOAD_DIR", tmpDir)
+
+	store := NewLocalStorageFromEnv()
+	if store == nil {
+		t.Fatal("NewLocalStorageFromEnv returned nil")
+	}
+
+	for _, key := range []string{"../outside.txt", "/absolute.txt", "a/../../outside.txt"} {
+		t.Run(key, func(t *testing.T) {
+			ctx := context.Background()
+			if _, err := store.Upload(ctx, key, []byte("body"), "text/plain", "outside.txt"); err == nil {
+				t.Error("Upload should reject non-local key")
+			}
+			if _, err := store.UploadStream(ctx, key, strings.NewReader("body"), 4, "text/plain", "outside.txt"); err == nil {
+				t.Error("UploadStream should reject non-local key")
+			}
+			if _, err := store.UploadFromReader(ctx, key, strings.NewReader("body"), "text/plain", "outside.txt"); err == nil {
+				t.Error("UploadFromReader should reject non-local key")
+			}
+			if _, err := store.writeAtomic(key, strings.NewReader("body")); err == nil {
+				t.Error("writeAtomic should reject non-local key")
+			}
+			if rc, err := store.GetReader(ctx, key); err == nil {
+				rc.Close()
+				t.Error("GetReader should reject non-local key")
+			}
+			if _, err := store.GetFilePath(key); err == nil {
+				t.Error("GetFilePath should reject non-local key")
+			}
+			if err := store.DeleteObject(ctx, key); err == nil {
+				t.Error("DeleteObject should reject non-local key")
+			}
+			if _, ok := store.readLocalMeta(key); ok {
+				t.Error("readLocalMeta should reject non-local key")
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/uploads/rejected", nil)
+			rec := httptest.NewRecorder()
+			store.ServeFile(rec, req, key)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("ServeFile status = %d, want 404", rec.Code)
+			}
+		})
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid keys created files inside upload dir: %v", entries)
+	}
+
+	outsidePath := filepath.Join(filepath.Dir(tmpDir), filepath.Base(tmpDir)+"-outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("sentinel"), 0644); err != nil {
+		t.Fatalf("seed outside sentinel: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outsidePath) })
+	store.Delete(context.Background(), "../"+filepath.Base(outsidePath))
+	body, err := os.ReadFile(outsidePath)
+	if err != nil || string(body) != "sentinel" {
+		t.Fatalf("Delete touched outside sentinel: body=%q err=%v", body, err)
+	}
+}
+
+func TestLocalStorage_UnixBackslashIsFilenameCharacter(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("backslash is a path separator on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	store := &LocalStorage{uploadDir: tmpDir}
+	key := `folder\name.txt`
+	if _, err := store.Upload(context.Background(), key, []byte("body"), "text/plain", "name.txt"); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, key)); err != nil {
+		t.Fatalf("backslash filename should be stored unchanged on Unix: %v", err)
+	}
+}
+
 // The sidecar JSON is an internal detail. Allowing /content to read it via a
 // crafted key would expose the original filename + content-type stored next
 // to every upload.
