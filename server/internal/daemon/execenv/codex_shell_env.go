@@ -61,7 +61,7 @@ func CodexShellEnvAllowlist(inherited []string, explicit map[string]string, auth
 
 	// Codex's glob matching is case-insensitive. De-duplicate on the same basis
 	// so Windows Path/PATH aliases cannot create ambiguous policy entries.
-	allowed := make(map[string]string, len(inherited)+len(explicit))
+	allowed := make(map[string]string, len(inherited))
 	add := func(key string, isExplicit bool) {
 		if key == "" {
 			return

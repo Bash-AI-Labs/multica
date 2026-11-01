@@ -988,7 +988,18 @@ func writeSkillFiles(skillsDir string, skills []SkillContextForEnv, manifest *si
 			if skillpkg.IsReservedContentPath(f.Path) {
 				continue
 			}
-			fpath := filepath.Join(dir, f.Path)
+			if !skillpkg.IsSafeFilePath(f.Path) {
+				return fmt.Errorf("invalid supporting file path %q for skill %q", f.Path, skill.Name)
+			}
+			relative := filepath.FromSlash(f.Path)
+			if !filepath.IsLocal(relative) {
+				return fmt.Errorf("invalid supporting file path %q for skill %q", f.Path, skill.Name)
+			}
+			fpath := filepath.Join(dir, relative)
+			rel, err := filepath.Rel(dir, fpath)
+			if err != nil || !filepath.IsLocal(rel) {
+				return fmt.Errorf("supporting file path %q escapes skill %q", f.Path, skill.Name)
+			}
 			if err := recordMkdirAll(filepath.Dir(fpath), 0o755, manifest); err != nil {
 				return err
 			}

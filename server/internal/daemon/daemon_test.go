@@ -44,6 +44,7 @@ func createDaemonTestRepo(t *testing.T) string {
 			t.Fatalf("git setup failed: %s: %v", out, err)
 		}
 	}
+	t.Cleanup(repocache.TrustLocalRepositoryForTesting(dir))
 	return dir
 }
 
@@ -5090,6 +5091,7 @@ func TestEnsureRepoReadyReportsSyncFailure(t *testing.T) {
 	t.Parallel()
 
 	missingRepo := filepath.Join(t.TempDir(), "missing-repo")
+	t.Cleanup(repocache.TrustLocalRepositoryForTesting(missingRepo))
 	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(WorkspaceReposResponse{
 			WorkspaceID:  "ws-1",

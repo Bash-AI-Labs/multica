@@ -42,7 +42,9 @@ func createFilterableTestRepo(t *testing.T) string {
 		run("-C", dir, "add", name)
 		run("-C", dir, "commit", "-m", "add "+name)
 	}
-	return "file://" + dir
+	repoURL := "file://" + dir
+	t.Cleanup(TrustLocalRepositoryForTesting(repoURL))
+	return repoURL
 }
 
 var partialCloneTestFiles = []string{"a.txt", "b.txt"}
@@ -61,6 +63,9 @@ func seedBloblessCache(t *testing.T, cache *Cache, workspaceID, sourceRepo strin
 	}
 	if err := ensureRemoteTrackingLayout(barePath); err != nil {
 		t.Fatalf("ensure refspec: %v", err)
+	}
+	if err := recordCacheOriginURL(barePath, sourceRepo); err != nil {
+		t.Fatalf("record cache origin: %v", err)
 	}
 	if !isPartialClone(barePath) {
 		t.Fatal("seeded cache is not a partial clone; the filter was ignored")

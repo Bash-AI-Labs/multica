@@ -62,4 +62,39 @@ func TestWriteSkillFilesIgnoresBundledSkillMd(t *testing.T) {
 			t.Errorf("expected supporting file %s to be written: %v", name, err)
 		}
 	}
+
+}
+
+func TestWriteSkillFilesRejectsPathsOutsideSkillDirectory(t *testing.T) {
+	t.Parallel()
+
+	for _, filePath := range []string{
+		"../escape.md",
+		"templates/../../escape.md",
+		"/absolute.md",
+		`..\escape.md`,
+		"C:/escape.md",
+	} {
+		filePath := filePath
+		t.Run(filePath, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			skillsDir := filepath.Join(root, "skills")
+			skills := []SkillContextForEnv{{
+				Name:    "Unsafe",
+				Content: "body",
+				Files:   []SkillFileContextForEnv{{Path: filePath, Content: "owned"}},
+			}}
+
+			for _, manifest := range []*sidecarManifest{nil, &sidecarManifest{}} {
+				err := writeSkillFiles(skillsDir, skills, manifest)
+				if err == nil {
+					t.Fatalf("writeSkillFiles accepted %q with manifest=%v", filePath, manifest != nil)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(root, "escape.md")); !os.IsNotExist(err) {
+				t.Fatalf("path %q wrote outside skills directory: %v", filePath, err)
+			}
+		})
+	}
 }
