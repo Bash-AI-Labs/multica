@@ -5,8 +5,9 @@ import type { Lang } from "./i18n";
 // English uses Fumadocs defaults, so only the translated locales override them.
 export const uiTranslations: Partial<Record<Lang, Partial<Translations>>> = {
   zh: {
-    "Search(search trigger)": "搜索",
     "Search(search dialog)": "搜索",
+    "Search(search trigger)": "搜索",
+    "Open Search(search trigger)(aria-label)": "搜索",
     "No results found(search dialog)": "没有找到结果",
     "On this page(table of contents)": "本页目录",
     "No Headings(table of contents)": "无章节",
@@ -19,8 +20,9 @@ export const uiTranslations: Partial<Record<Lang, Partial<Translations>>> = {
     "Edit on GitHub(edit page)": "在 GitHub 上编辑",
   },
   ko: {
-    "Search(search trigger)": "검색",
     "Search(search dialog)": "검색",
+    "Search(search trigger)": "검색",
+    "Open Search(search trigger)(aria-label)": "검색",
     "No results found(search dialog)": "결과가 없습니다",
     "On this page(table of contents)": "이 페이지에서",
     "No Headings(table of contents)": "제목 없음",
@@ -33,8 +35,9 @@ export const uiTranslations: Partial<Record<Lang, Partial<Translations>>> = {
     "Edit on GitHub(edit page)": "GitHub에서 편집",
   },
   ja: {
-    "Search(search trigger)": "検索",
     "Search(search dialog)": "検索",
+    "Search(search trigger)": "検索",
+    "Open Search(search trigger)(aria-label)": "検索",
     "No results found(search dialog)": "結果が見つかりません",
     "On this page(table of contents)": "このページの内容",
     "No Headings(table of contents)": "見出しなし",
@@ -47,8 +50,9 @@ export const uiTranslations: Partial<Record<Lang, Partial<Translations>>> = {
     "Edit on GitHub(edit page)": "GitHub で編集",
   },
   fr: {
-    "Search(search trigger)": "Rechercher",
     "Search(search dialog)": "Rechercher",
+    "Search(search trigger)": "Rechercher",
+    "Open Search(search trigger)(aria-label)": "Rechercher",
     "No results found(search dialog)": "Aucun résultat",
     "On this page(table of contents)": "Sur cette page",
     "No Headings(table of contents)": "Aucun titre",

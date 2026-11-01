@@ -1,11 +1,11 @@
 import { resolve } from "path";
-import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { defineConfig } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    build: { externalizeDeps: true },
   },
   preload: {
     // `@electron-toolkit/preload` must be bundled INTO the preload script:
@@ -14,7 +14,9 @@ export default defineConfig({
     // externalized `require("@electron-toolkit/preload")` would throw and
     // every contextBridge API would vanish. electron-vite emits preload as a
     // single CJS bundle, which is exactly what the sandbox requires.
-    plugins: [externalizeDepsPlugin({ exclude: ["@electron-toolkit/preload"] })],
+    build: {
+      externalizeDeps: { exclude: ["@electron-toolkit/preload"] },
+    },
   },
   renderer: {
     server: {
