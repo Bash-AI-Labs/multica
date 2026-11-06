@@ -12,6 +12,7 @@ const NOTIFICATION_GROUP_KEYS: readonly NotificationGroupKey[] = [
   "updates",
   "agent_activity",
   "system_notifications",
+  "email_notifications",
 ];
 
 function preferenceValue(
@@ -39,6 +40,12 @@ export function deriveNotificationPreferencePatch(
     }
   }
 
+  const previousWebhook = previous.google_chat_webhook ?? "";
+  const nextWebhook = next.google_chat_webhook ?? "";
+  if (previousWebhook !== nextWebhook) {
+    patch.google_chat_webhook = nextWebhook;
+  }
+
   return patch;
 }
 
@@ -55,6 +62,14 @@ export function applyNotificationPreferencePatch(
       next[key] = value;
     } else if (value === "all") {
       delete next[key];
+    }
+  }
+
+  if (patch.google_chat_webhook !== undefined) {
+    if (patch.google_chat_webhook === "") {
+      delete next.google_chat_webhook;
+    } else {
+      next.google_chat_webhook = patch.google_chat_webhook;
     }
   }
 
@@ -86,6 +101,18 @@ export function rollbackNotificationPreferencePatch(
       delete next[key];
     } else {
       next[key] = previousValue;
+    }
+  }
+
+  if (
+    patch.google_chat_webhook !== undefined &&
+    (current.google_chat_webhook ?? "") === patch.google_chat_webhook
+  ) {
+    const previousWebhook = previous.google_chat_webhook ?? "";
+    if (previousWebhook === "") {
+      delete next.google_chat_webhook;
+    } else {
+      next.google_chat_webhook = previousWebhook;
     }
   }
 

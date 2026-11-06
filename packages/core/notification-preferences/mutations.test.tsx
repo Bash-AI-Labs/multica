@@ -98,6 +98,36 @@ describe("useUpdateNotificationPreferences", () => {
     });
   });
 
+  it("installs the server-masked webhook response after a successful write", async () => {
+    const masked =
+      "https://chat.googleapis.com/v1/spaces/AAAA…/messages?••••";
+    updateNotificationPreferences.mockResolvedValueOnce({
+      workspace_id: WORKSPACE_ID,
+      preferences: { google_chat_webhook: masked },
+    });
+    queryClient.setQueryData(notificationPreferenceKeys.all(WORKSPACE_ID), {
+      workspace_id: WORKSPACE_ID,
+      preferences: {},
+    });
+    const { result } = renderHook(
+      () => useUpdateNotificationPreferences(),
+      { wrapper: createWrapper(queryClient) },
+    );
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        google_chat_webhook:
+          "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=x&token=y",
+      });
+    });
+
+    expect(
+      queryClient.getQueryData<NotificationPreferenceResponse>(
+        notificationPreferenceKeys.all(WORKSPACE_ID),
+      )?.preferences.google_chat_webhook,
+    ).toBe(masked);
+  });
+
   it("sends all explicitly when a muted group is enabled", async () => {
     queryClient.setQueryData(notificationPreferenceKeys.all(WORKSPACE_ID), {
       workspace_id: WORKSPACE_ID,

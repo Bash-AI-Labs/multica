@@ -115,6 +115,13 @@ export function useUpdateNotificationPreferences() {
         ),
       }));
     },
+    onSuccess: (data, { workspaceId }, context) => {
+      const mutationKey = notificationPreferenceKeys.all(workspaceId);
+      // Do not replace a later optimistic patch with an earlier server
+      // response. The final queued mutation installs the server-masked result.
+      if (qc.isMutating({ mutationKey }) > 1) return;
+      qc.setQueryData(context?.key ?? mutationKey, data);
+    },
     onSettled: (_data, _error, { workspaceId }, context) => {
       const mutationKey = notificationPreferenceKeys.all(workspaceId);
       // The current mutation is still counted during onSettled. Reconcile

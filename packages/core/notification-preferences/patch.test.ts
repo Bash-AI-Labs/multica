@@ -56,6 +56,54 @@ describe("notification preference patches", () => {
     ).toEqual({ comments: "muted", mentions: "muted" });
   });
 
+  it("patches email delivery like the other toggles", () => {
+    expect(
+      deriveNotificationPreferencePatch(
+        {},
+        { email_notifications: "muted" },
+      ),
+    ).toEqual({ email_notifications: "muted" });
+    expect(
+      applyNotificationPreferencePatch(
+        { email_notifications: "muted" },
+        { email_notifications: "all" },
+      ),
+    ).toEqual({});
+  });
+
+  it("sets, clears, and rolls back Google Chat webhook strings", () => {
+    const masked =
+      "https://chat.googleapis.com/v1/spaces/AAAA…/messages?••••";
+    const replacement =
+      "https://chat.googleapis.com/v1/spaces/BBBB/messages?key=x&token=y";
+
+    expect(
+      deriveNotificationPreferencePatch(
+        { google_chat_webhook: masked },
+        { google_chat_webhook: replacement },
+      ),
+    ).toEqual({ google_chat_webhook: replacement });
+    expect(
+      deriveNotificationPreferencePatch(
+        { google_chat_webhook: masked },
+        {},
+      ),
+    ).toEqual({ google_chat_webhook: "" });
+    expect(
+      applyNotificationPreferencePatch(
+        { google_chat_webhook: masked },
+        { google_chat_webhook: "" },
+      ),
+    ).toEqual({});
+    expect(
+      rollbackNotificationPreferencePatch(
+        { google_chat_webhook: replacement },
+        { google_chat_webhook: replacement },
+        { google_chat_webhook: masked },
+      ),
+    ).toEqual({ google_chat_webhook: masked });
+  });
+
   it("does not roll back a key that a later mutation already changed", () => {
     expect(
       rollbackNotificationPreferencePatch(

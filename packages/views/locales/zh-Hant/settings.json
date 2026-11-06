@@ -688,6 +688,25 @@
       "granted": "當前瀏覽器可以彈出通知橫幅。",
       "denied": "已被瀏覽器攔截。請在瀏覽器設定中為本站點開啟通知權限。",
       "enabled_badge": "已啟用"
+    },
+    "delivery": {
+      "title": "通知傳送",
+      "description": "將重要的未讀通知傳送到 Multica 之外。",
+      "email": {
+        "label": "電子郵件通知",
+        "description": "提及、分配及需要你協助的 AI 代理通知，若 10 分鐘後仍未讀則傳送"
+      },
+      "google_chat": {
+        "label": "Google Chat",
+        "description": "將相同的未讀通知傳送到 Google Chat 空間。",
+        "input_label": "Google Chat Webhook URL",
+        "placeholder": "https://chat.googleapis.com/v1/spaces/…",
+        "how_to": "Google Chat 空間 → 應用程式與整合 → Webhook → 新增 Webhook → 貼上 URL。",
+        "save": "儲存",
+        "cancel": "取消",
+        "replace": "替換",
+        "remove": "移除"
+      }
     }
   },
   "tokens": {

@@ -732,6 +732,23 @@ func main() {
 	integrationSvc := service.NewIntegrationService(queries, pool, bus, taskSvc)
 	registerAutopilotListeners(bus, autopilotSvc)
 	registerIntegrationListeners(bus, integrationSvc)
+	notificationDeliveryConfig := service.NotificationDeliveryConfigFromEnv()
+	notificationDeliveryChannels := []string{"google_chat"}
+	if h.EmailService != nil && h.EmailService.Configured() {
+		notificationDeliveryChannels = append(notificationDeliveryChannels, "email")
+	}
+	slog.Info("notification delivery configured",
+		"enabled", notificationDeliveryConfig.Enabled,
+		"channels", strings.Join(notificationDeliveryChannels, ","),
+		"types", strings.Join(notificationDeliveryConfig.Types, ","),
+		"delay", notificationDeliveryConfig.Delay.String(),
+	)
+	notificationDelivery := service.NewNotificationDeliveryService(
+		queries,
+		h.EmailService,
+		h.NotificationChatSender,
+		notificationDeliveryConfig,
+	)
 
 	// Construct a LivenessStore that mirrors the one wired into the HTTP
 	// handler. Both the heartbeat write path (handler) and the sweeper read
@@ -754,6 +771,9 @@ func main() {
 	// Queued work now expires on the same runtime-liveness signal as in-flight
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
+	if notificationDeliveryConfig.Enabled {
+		go notificationDelivery.Run(sweepCtx)
+	}
 	go h.RunQoderConnections(sweepCtx, pool, "http://localhost:"+port)
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
 	if telemetryWorker != nil {
