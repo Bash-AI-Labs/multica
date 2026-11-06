@@ -213,6 +213,9 @@ func (s *NotificationDeliveryService) DeliverAt(ctx context.Context, now time.Ti
 					"item_count", len(batch.Items),
 					"error", err,
 				)
+			} else {
+				slog.Info("notification delivered", "channel", "email",
+					"workspace_id", batch.WorkspaceID, "recipient_id", batch.RecipientID, "item_count", len(batch.Items))
 			}
 		}
 
@@ -228,6 +231,9 @@ func (s *NotificationDeliveryService) DeliverAt(ctx context.Context, now time.Ti
 				"item_count", len(batch.Items),
 				"error", err,
 			)
+		} else {
+			slog.Info("notification delivered", "channel", "google_chat",
+				"workspace_id", batch.WorkspaceID, "recipient_id", batch.RecipientID, "item_count", len(batch.Items))
 		}
 	}
 
