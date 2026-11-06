@@ -57,6 +57,20 @@ STARTTLS is used automatically when advertised by the server. Port 465 (SMTPS / 
 
 > **Note:** If neither Resend nor SMTP is configured, generated verification codes are printed to backend logs — copy them from there to log in. A fixed local testing code (e.g. `888888`) is **opt-in only**: set `MULTICA_DEV_VERIFICATION_CODE=888888` in `.env` and keep `APP_ENV` non-production. The Docker self-host stack pins `APP_ENV=production`, so the shortcut is ignored there. **Never enable a fixed code on a publicly reachable instance.**
 
+#### Out-of-app notification delivery
+
+Members can enable email delivery and connect a Google Chat incoming webhook from **Settings → Notifications → Delivery**. Delivery uses the existing per-workspace notification preferences, so each member configures each workspace independently. Email delivery requires either Resend or SMTP; Google Chat is configured with the member's incoming-webhook URL.
+
+The backend checks once per minute and sends one email and/or one Google Chat message per workspace and recipient. It only includes configured delivery types that are still unread and not archived after the delay. Items muted by their inbox notification group never create an inbox row and therefore are never delivered.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NOTIFICATION_DELIVERY_ENABLED` | Set to `false` to disable the delivery worker entirely. Empty uses the default. | `true` |
+| `NOTIFICATION_DELIVERY_DELAY` | Go duration to wait before delivery. This avoids a second ping when someone reads or archives the item in Multica. `0` makes new items eligible on the next one-minute tick. Empty uses the default. | `10m` |
+| `NOTIFICATION_DELIVERY_TYPES` | Comma-separated inbox item types eligible for out-of-app delivery. Empty uses the default. | `mentioned,issue_assigned,agent_blocked` |
+
+The startup watermark is `now - delay`, so a deployment or restart never sends an old backlog. The worker is intentionally single-instance and keeps its watermark in memory; a restart may skip items created during the downtime window. Run one backend instance for this delivery mode.
+
 ### Google OAuth (Optional)
 
 | Variable | Description |

@@ -675,6 +675,25 @@
       "granted": "Este navegador puede mostrar avisos de notificación.",
       "denied": "Bloqueado por tu navegador. Activa las notificaciones para este sitio en la configuración del navegador.",
       "enabled_badge": "Activado"
+    },
+    "delivery": {
+      "title": "Entrega",
+      "description": "Envía fuera de Multica las notificaciones importantes que sigan sin leer.",
+      "email": {
+        "label": "Notificaciones por correo",
+        "description": "Menciones, asignaciones y agentes que necesitan tu intervención si siguen sin leer después de 10 minutos"
+      },
+      "google_chat": {
+        "label": "Google Chat",
+        "description": "Publica las mismas notificaciones sin leer en un espacio de Google Chat.",
+        "input_label": "URL del webhook de Google Chat",
+        "placeholder": "https://chat.googleapis.com/v1/spaces/…",
+        "how_to": "Espacio de Google Chat → Aplicaciones e integraciones → Webhooks → Añadir webhook → pega la URL.",
+        "save": "Guardar",
+        "cancel": "Cancelar",
+        "replace": "Reemplazar",
+        "remove": "Eliminar"
+      }
     }
   },
   "tokens": {

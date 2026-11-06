@@ -688,6 +688,25 @@
       "granted": "このブラウザは通知バナーを表示できます。",
       "denied": "ブラウザによってブロックされています。ブラウザの設定でこのサイトの通知を許可してください。",
       "enabled_badge": "有効"
+    },
+    "delivery": {
+      "title": "配信",
+      "description": "重要な未読通知を Multica の外にも送信します。",
+      "email": {
+        "label": "メール通知",
+        "description": "メンション、担当の割り当て、入力を必要としているエージェントの通知が 10 分後も未読の場合"
+      },
+      "google_chat": {
+        "label": "Google Chat",
+        "description": "同じ未読通知を Google Chat スペースに投稿します。",
+        "input_label": "Google Chat Webhook URL",
+        "placeholder": "https://chat.googleapis.com/v1/spaces/…",
+        "how_to": "Google Chat スペース → アプリと統合 → Webhook → Webhook を追加 → URL を貼り付けます。",
+        "save": "保存",
+        "cancel": "キャンセル",
+        "replace": "置き換え",
+        "remove": "削除"
+      }
     }
   },
   "tokens": {

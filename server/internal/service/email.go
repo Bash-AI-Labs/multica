@@ -368,6 +368,33 @@ func parseMailboxAddress(raw string) (*mail.Address, error) {
 	return address, nil
 }
 
+// Configured reports whether this service can deliver email outside the
+// process. Development stdout logging is intentionally not a configured
+// delivery channel.
+func (s *EmailService) Configured() bool {
+	return s != nil && (s.smtpHost != "" || s.client != nil)
+}
+
+// SendHTML delivers a generic HTML message through the configured provider.
+// SMTP takes priority over Resend, matching the authentication email paths.
+func (s *EmailService) SendHTML(to, subject, htmlBody string) error {
+	if s.smtpHost != "" {
+		return s.sendSMTP(to, sanitizeSubjectField(subject), htmlBody)
+	}
+	if s.client == nil {
+		fmt.Printf("[DEV] Email to %s: %s\n", to, sanitizeSubjectField(subject))
+		return nil
+	}
+	params := &resend.SendEmailRequest{
+		From:    s.fromEmail,
+		To:      []string{to},
+		Subject: sanitizeSubjectField(subject),
+		Html:    htmlBody,
+	}
+	_, err := s.client.Emails.Send(params)
+	return err
+}
+
 // SendVerificationCode sends a one-time login code. The code is server-generated
 // (6-digit numeric) so no user-controlled text reaches the email body here.
 // Delivery priority: SMTP relay → Resend API → DEV stdout.

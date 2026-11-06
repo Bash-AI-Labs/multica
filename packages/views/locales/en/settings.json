@@ -693,6 +693,25 @@
       "granted": "This browser can show notification banners.",
       "denied": "Blocked by your browser. Enable notifications for this site in your browser settings.",
       "enabled_badge": "Enabled"
+    },
+    "delivery": {
+      "title": "Delivery",
+      "description": "Send important unread notifications outside Multica.",
+      "email": {
+        "label": "Email notifications",
+        "description": "Mentions, assignments, and agents needing your input, if still unread after 10 minutes"
+      },
+      "google_chat": {
+        "label": "Google Chat",
+        "description": "Post the same unread notifications to a Google Chat space.",
+        "input_label": "Google Chat webhook URL",
+        "placeholder": "https://chat.googleapis.com/v1/spaces/…",
+        "how_to": "Google Chat space → Apps & integrations → Webhooks → Add webhook → paste the URL.",
+        "save": "Save",
+        "cancel": "Cancel",
+        "replace": "Replace",
+        "remove": "Remove"
+      }
     }
   },
   "tokens": {
