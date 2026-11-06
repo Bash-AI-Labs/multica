@@ -62,6 +62,10 @@ type CommentResponse struct {
 	// replies.
 	ReplyCount     *int    `json:"reply_count,omitempty"`
 	LastActivityAt *string `json:"last_activity_at,omitempty"`
+	// Populated on roots_only for reply-resolved threads.
+	ResolutionID               *string `json:"resolution_id,omitempty"`
+	ResolutionContent          *string `json:"resolution_content,omitempty"`
+	ResolutionContentTruncated *bool   `json:"resolution_content_truncated,omitempty"`
 	// ContentTruncated is set only under summary=true: true when Content was
 	// clipped to the summary budget, false when it fit. nil (omitted) means the
 	// caller did not request a summary projection, so Content is verbatim.
@@ -594,6 +598,20 @@ func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
 				la := timestampToString(st.LastActivityAt)
 				resp[i].LastActivityAt = &la
 			}
+			if c.ResolvedAt.Valid || st.ResolutionID.Valid {
+				resolved := true
+				resp[i].ThreadResolved = &resolved
+			}
+			if !c.ResolvedAt.Valid && st.ResolutionID.Valid {
+				resp[i].ResolutionID = uuidToPtr(st.ResolutionID)
+				content := st.ResolutionContent.String
+				if summary {
+					clipped, truncated := summarizeContent(content)
+					content = clipped
+					resp[i].ResolutionContentTruncated = &truncated
+				}
+				resp[i].ResolutionContent = &content
+			}
 		}
 		// Attach fold annotations on a resolved thread's root (nil map elsewhere;
 		// keyed by root id, so only root comments match).
@@ -674,8 +692,10 @@ type fetchCommentsResult struct {
 // rootStat is the per-thread orientation metadata attached to each root comment
 // on the roots_only path. See CommentResponse.ReplyCount / LastActivityAt.
 type rootStat struct {
-	ReplyCount     int
-	LastActivityAt pgtype.Timestamptz
+	ReplyCount        int
+	LastActivityAt    pgtype.Timestamptz
+	ResolutionID      pgtype.UUID
+	ResolutionContent pgtype.Text
 }
 
 var (
@@ -997,7 +1017,12 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 					SourceTaskID: r.SourceTaskID, QuickActionID: r.QuickActionID, Revision: r.Revision,
 					DeletedAt: r.DeletedAt,
 				}
-				stats[uuidToString(r.ID)] = rootStat{ReplyCount: int(r.ReplyCount), LastActivityAt: r.LastActivityAt}
+				stats[uuidToString(r.ID)] = rootStat{
+					ReplyCount:        int(r.ReplyCount),
+					LastActivityAt:    r.LastActivityAt,
+					ResolutionID:      r.ResolutionID,
+					ResolutionContent: r.ResolutionContent,
+				}
 			}
 			return fetchCommentsResult{
 				Comments: comments, RootStats: stats, CommentsTruncated: truncated,
@@ -1028,7 +1053,12 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 				SourceTaskID: r.SourceTaskID, QuickActionID: r.QuickActionID, Revision: r.Revision,
 				DeletedAt: r.DeletedAt,
 			}
-			stats[uuidToString(r.ID)] = rootStat{ReplyCount: int(r.ReplyCount), LastActivityAt: r.LastActivityAt}
+			stats[uuidToString(r.ID)] = rootStat{
+				ReplyCount:        int(r.ReplyCount),
+				LastActivityAt:    r.LastActivityAt,
+				ResolutionID:      r.ResolutionID,
+				ResolutionContent: r.ResolutionContent,
+			}
 		}
 		return fetchCommentsResult{
 			Comments: comments, RootStats: stats, CommentsTruncated: truncated,
