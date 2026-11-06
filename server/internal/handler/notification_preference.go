@@ -157,6 +157,11 @@ func (h *Handler) prepareNotificationPreferenceUpdate(
 
 	incomingWebhook, webhookIncluded := next["google_chat_webhook"]
 	currentWebhook := current["google_chat_webhook"]
+	if !webhookIncluded && currentWebhook != "" {
+		// Clients that predate Google Chat delivery replace-all PUT without
+		// this key; keep the credential instead of silently disconnecting.
+		next["google_chat_webhook"] = currentWebhook
+	}
 	if webhookIncluded && incomingWebhook != "" {
 		currentMasked := service.MaskGoogleChatWebhookURL(currentWebhook)
 		if currentMasked != "" && incomingWebhook == currentMasked {

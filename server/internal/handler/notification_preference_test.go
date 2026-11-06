@@ -328,6 +328,32 @@ func TestNotificationPreferenceMaskedEchoPreservesWebhookOnPut(t *testing.T) {
 	}
 }
 
+func TestNotificationPreferencePutWithoutWebhookKeepsIt(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	webhook := "https://chat.googleapis.com/v1/spaces/AAAA_123/messages?key=test-key&token=test-token"
+	seedNotificationPreference(t, `{"google_chat_webhook":"`+webhook+`","mentions":"muted"}`)
+	sender := &fakePreferenceChatSender{}
+	usePreferenceChatSender(t, sender)
+
+	// An installed client that predates the webhook key replaces all prefs.
+	testutil.Call(t, testHandler.UpdateNotificationPreferences,
+		notificationPreferenceRequest(t, http.MethodPut, map[string]string{"comments": "muted"}),
+	).Want(http.StatusOK)
+
+	if sender.calls != 0 {
+		t.Fatalf("unchanged webhook sent %d confirmations", sender.calls)
+	}
+	stored := readStoredNotificationPreferences(t)
+	if stored["google_chat_webhook"] != webhook || stored["comments"] != "muted" {
+		t.Fatalf("stored preferences = %#v", stored)
+	}
+	if _, ok := stored["mentions"]; ok {
+		t.Fatalf("replace-all PUT retained omitted mentions: %#v", stored)
+	}
+}
+
 func TestNotificationPreferenceGoogleChatClearing(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
