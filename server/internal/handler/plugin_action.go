@@ -468,7 +468,7 @@ func (h *Handler) ListPluginTaskMessages(w http.ResponseWriter, r *http.Request)
 
 	var messages []db.TaskMessage
 	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
-		sinceSeq, parseErr := strconv.Atoi(sinceStr)
+		sinceSeq, parseErr := strconv.ParseInt(sinceStr, 10, 32)
 		if parseErr != nil || sinceSeq < 0 {
 			publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "invalid since parameter")
 			return
