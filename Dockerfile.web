@@ -52,8 +52,10 @@ ARG NEXT_PUBLIC_APP_VERSION=dev
 ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
 ENV STANDALONE=true
 
-# Build the web app (standalone output for minimal runtime)
-RUN pnpm --filter @multica/web build
+# Build the web app (standalone output for minimal runtime). Next's build
+# outgrows Node's default ~2 GB heap inside an 8 GB Docker Desktop VM.
+ARG WEB_BUILD_MAX_OLD_SPACE_MB=4096
+RUN NODE_OPTIONS="--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_MB}" pnpm --filter @multica/web build
 
 # --- Runtime ---
 FROM node:22.23.4-alpine AS runner
