@@ -497,6 +497,17 @@ func GoogleChatSpaceID(raw string) string {
 	return matches[1]
 }
 
+// googleChatRequestURL rebuilds a validated webhook from a constant origin so
+// the request host can never come from stored user input.
+func googleChatRequestURL(endpoint *url.URL) (string, error) {
+	matches := googleChatWebhookPathPattern.FindStringSubmatch(endpoint.EscapedPath())
+	if len(matches) != 2 {
+		return "", errors.New("Google Chat webhook path must match /v1/spaces/{space}/messages")
+	}
+	return "https://chat.googleapis.com/v1/spaces/" + url.PathEscape(matches[1]) +
+		"/messages?" + endpoint.Query().Encode(), nil
+}
+
 type restrictedGoogleChatSender struct {
 	newClient func(*url.URL, time.Duration, bool) (*http.Client, error)
 }
@@ -515,8 +526,12 @@ func (s *restrictedGoogleChatSender) Send(ctx context.Context, webhookURL, text 
 		return errors.New("could not initialize Google Chat delivery")
 	}
 
+	requestURL, err := googleChatRequestURL(endpoint)
+	if err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(map[string]string{"text": text})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payload))
 	if err != nil {
 		return errors.New("could not create Google Chat request")
 	}
