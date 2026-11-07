@@ -331,6 +331,9 @@ func TestGoogleChatSenderUsesInjectedRestrictedClient(t *testing.T) {
 				if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
 					t.Fatalf("request = %s content-type=%q", request.Method, request.Header.Get("Content-Type"))
 				}
+				if got := request.URL.String(); got != webhook {
+					t.Fatalf("request URL = %s, want %s", got, webhook)
+				}
 				body, err := io.ReadAll(request.Body)
 				if err != nil {
 					t.Fatal(err)
@@ -350,6 +353,28 @@ func TestGoogleChatSenderUsesInjectedRestrictedClient(t *testing.T) {
 	}
 	if requestBody != `{"text":"hello \u003cteam\u003e"}` {
 		t.Fatalf("request body = %s", requestBody)
+	}
+}
+
+func TestGoogleChatRequestURLUsesConstantOrigin(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{
+			raw:  "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t",
+			want: "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t",
+		},
+		{
+			raw:  "https://CHAT.googleapis.com/v1/spaces/AA_b-9/messages?token=t%2Bx&key=k&threadKey=x",
+			want: "https://chat.googleapis.com/v1/spaces/AA_b-9/messages?key=k&threadKey=x&token=t%2Bx",
+		},
+	} {
+		endpoint, err := ValidateGoogleChatWebhookURL(tc.raw)
+		if err != nil {
+			t.Fatalf("validate %s: %v", tc.raw, err)
+		}
+		got, err := googleChatRequestURL(endpoint)
+		if err != nil || got != tc.want {
+			t.Fatalf("googleChatRequestURL(%s) = %q, %v; want %q", tc.raw, got, err, tc.want)
+		}
 	}
 }
 
