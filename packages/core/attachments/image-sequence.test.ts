@@ -207,7 +207,9 @@ describe("collectImageSequence", () => {
     ]);
 
     expect(sequence.map((item) => item.key)).toEqual(["https://cdn/yes.png"]);
-    expect(performance.now() - started).toBeLessThan(50);
+    // Linear parsing takes ~20ms here; quadratic backtracking would take seconds.
+    // The headroom keeps the guard stable when the full suite runs in parallel.
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("reads raw <img> tags and image-named file cards", () => {
