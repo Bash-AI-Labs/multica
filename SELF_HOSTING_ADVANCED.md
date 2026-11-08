@@ -71,6 +71,16 @@ The backend checks once per minute and sends one email and/or one Google Chat me
 
 The startup watermark is `now - delay`, so a deployment or restart never sends an old backlog. The worker is intentionally single-instance and keeps its watermark in memory; a restart may skip items created during the downtime window. Run one backend instance for this delivery mode.
 
+#### Agents resolve merge conflicts on their pull requests
+
+Every two minutes the backend gives each open issue that is assigned to an agent and linked to an open (or draft) GitHub pull request one continuous **PR has merge conflicts** wakeup rule. When another merge leaves that pull request conflicting with its base branch, the assignee agent is woken. It merges the base branch into the PR branch, resolves the conflicts, runs the relevant checks and pushes to the same branch. If a conflict needs a human decision, it comments on the issue instead. Each new conflict wakes the agent again, up to the rule's 20-run cap. The rule is an ordinary wakeup created on behalf of the agent's owner, so members can pause or delete it from the issue sidebar. A deleted rule is not recreated, and an agent's own conflict rule is left alone.
+
+Conflict detection reads GitHub's mergeability through the App API, so it requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` in `.env` (see the GitHub App block in `.env.example`; double-quote the PEM so its newlines survive). Without them, the rules are created but record "PR checks cannot be evaluated" and never fire. Self-hosted Forgejo, Gitea and GitLab pull requests are not covered.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_PR_CONFLICT_WAKEUPS` | Set to `false` to stop creating these rules. Existing rules keep running until disabled or deleted. Empty uses the default. | `true` |
+
 ### Google OAuth (Optional)
 
 | Variable | Description |
