@@ -3,14 +3,10 @@ package storage
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,19 +16,10 @@ import (
 type LocalStorage struct {
 	uploadDir string
 	baseURL   string
-	// signSecret, when non-empty, enables HMAC-SHA256 signing of object URLs.
-	// Public (funnel) reads of /uploads/ are gated on a valid signature so the
-	// publicly-exposed media path can't be enumerated or hot-linked without a
-	// URL Multica minted; trusted tailnet reads stay open. See the /uploads
-	// handler in router.go and docker/webhook-proxy/nginx.conf.
-	signSecret []byte
 }
 
-// metaSuffix is the on-disk extension for the sidecar JSON file that
-// captures an upload's original filename and sniffed content type. The
-// sidecar exists so ServeFile can set Content-Disposition the way S3's
-// PutObject path already does, instead of letting the browser fall back
-// to the storage-key basename for the download filename.
+// metaSuffix identifies legacy sidecar metadata. Uploads retain this on-disk
+// format; HTTP readers use the attachment record for filenames and types.
 const metaSuffix = ".meta.json"
 
 // tempSuffix is the on-disk extension of the staging file writeAtomic renames
@@ -66,50 +53,9 @@ func NewLocalStorageFromEnv() *LocalStorage {
 
 	slog.Info("local storage initialized", "dir", uploadDir, "baseURL", baseURL)
 	return &LocalStorage{
-		uploadDir:  uploadDir,
-		baseURL:    baseURL,
-		signSecret: []byte(os.Getenv("MEDIA_SIGNING_SECRET")),
+		uploadDir: uploadDir,
+		baseURL:   baseURL,
 	}
-}
-
-// SignatureEnabled reports whether object URLs are HMAC-signed and the public
-// /uploads handler should enforce a valid signature on funnel traffic.
-func (s *LocalStorage) SignatureEnabled() bool { return len(s.signSecret) > 0 }
-
-// signKey returns the lowercase-hex HMAC-SHA256 of the storage key, or "" when
-// signing is disabled. The signature covers only the immutable object key, so
-// the resulting URL never expires — required for media embedded in permanent
-// GitHub PR/comment bodies that GitHub's camo proxy may re-fetch indefinitely.
-// Rotating MEDIA_SIGNING_SECRET invalidates every previously-issued URL.
-func (s *LocalStorage) signKey(key string) string {
-	if len(s.signSecret) == 0 {
-		return ""
-	}
-	mac := hmac.New(sha256.New, s.signSecret)
-	mac.Write([]byte(key))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// VerifyKey reports whether sig is the valid signature for key. Constant-time.
-func (s *LocalStorage) VerifyKey(key, sig string) bool {
-	want := s.signKey(key)
-	if want == "" || sig == "" {
-		return false
-	}
-	return hmac.Equal([]byte(want), []byte(sig))
-}
-
-// objectURL builds the public URL for a stored key, appending the signature
-// query when signing is enabled.
-func (s *LocalStorage) objectURL(key string) string {
-	path := "/uploads/" + key
-	if sig := s.signKey(key); sig != "" {
-		path += "?sig=" + sig
-	}
-	if s.baseURL != "" {
-		return s.baseURL + path
-	}
-	return path
 }
 
 func (s *LocalStorage) CdnDomain() string {
@@ -124,10 +70,6 @@ func (s *LocalStorage) CdnDomain() string {
 }
 
 func (s *LocalStorage) KeyFromURL(rawURL string) string {
-	// Drop any query (e.g. the ?sig=… signature) before extracting the key.
-	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
-		rawURL = rawURL[:i]
-	}
 	if s.baseURL != "" && strings.HasPrefix(rawURL, s.baseURL) {
 		rawURL = strings.TrimPrefix(rawURL, s.baseURL)
 	}
@@ -142,35 +84,20 @@ func (s *LocalStorage) KeyFromURL(rawURL string) string {
 	return rawURL
 }
 
-// resolve validates an object key and returns its path below uploadDir.
-// filepath.IsLocal treats backslashes as ordinary filename characters on
-// Unix; that is intentional because only the platform path separator can
-// traverse directories.
-func (s *LocalStorage) resolve(key string) (string, error) {
-	if key == "" || !filepath.IsLocal(key) {
-		return "", fmt.Errorf("local storage: invalid key %q", key)
-	}
-
-	root := filepath.Clean(s.uploadDir)
-	target := filepath.Join(root, key)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("local storage: key escapes upload dir: %q", key)
-	}
-	return target, nil
-}
-
 // GetReader opens the underlying file for streaming. Refuses keys that
 // resolve outside uploadDir (defense against a stored key with traversal
 // components) and refuses the sidecar suffix so /content can't be coaxed
 // into leaking the .meta.json blob.
 func (s *LocalStorage) GetReader(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == "" {
+		return nil, fmt.Errorf("local GetReader: empty key")
+	}
 	if isInternalLocalPath(key) {
 		return nil, fmt.Errorf("local GetReader: refusing to serve internal key %q", key)
 	}
-	filePath, err := s.resolve(key)
-	if err != nil {
-		return nil, fmt.Errorf("local GetReader: %w", err)
+	filePath := filepath.Join(s.uploadDir, key)
+	if !isUnder(s.uploadDir, filePath) {
+		return nil, fmt.Errorf("local GetReader: key escapes upload dir: %q", key)
 	}
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -195,10 +122,7 @@ func (s *LocalStorage) DeleteObject(_ context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-	filePath, err := s.resolve(key)
-	if err != nil {
-		return fmt.Errorf("local storage DeleteObject: %w", err)
-	}
+	filePath := filepath.Join(s.uploadDir, key)
 	for _, p := range []string{filePath, filePath + metaSuffix, tempPath(filePath)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
@@ -211,7 +135,10 @@ func (s *LocalStorage) DeleteObject(_ context.Context, key string) error {
 // return — a pure function of configuration, so the media intent ledger can
 // persist it BEFORE the upload.
 func (s *LocalStorage) ObjectURL(key string) string {
-	return s.objectURL(key)
+	if s.baseURL != "" {
+		return fmt.Sprintf("%s/uploads/%s", s.baseURL, key)
+	}
+	return fmt.Sprintf("/uploads/%s", key)
 }
 
 func (s *LocalStorage) DeleteKeys(ctx context.Context, keys []string) {
@@ -221,16 +148,11 @@ func (s *LocalStorage) DeleteKeys(ctx context.Context, keys []string) {
 }
 
 func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {
-	dest, err := s.writeAtomic(key, bytes.NewReader(data))
-	if err != nil {
+	dest := filepath.Join(s.uploadDir, key)
+	if err := writeAtomic(dest, bytes.NewReader(data)); err != nil {
 		return "", err
 	}
-	// Best-effort sidecar so ServeFile can restore the original filename in
-	// Content-Disposition. A failure here is logged but does not fail the
-	// upload — the file is still usable, just without the human-readable
-	// download name. Skip when there's no filename to preserve: a sidecar
-	// without a filename is dead weight, since ServeFile only reads it for
-	// that field.
+	// Retain legacy sidecar metadata without failing an otherwise valid upload.
 	if filename != "" {
 		body, _ := json.Marshal(localMeta{Filename: filename, ContentType: contentType})
 		if err := os.WriteFile(dest+metaSuffix, body, 0644); err != nil {
@@ -238,12 +160,15 @@ func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, cont
 		}
 	}
 
-	return s.objectURL(key), nil
+	if s.baseURL != "" {
+		return fmt.Sprintf("%s/uploads/%s", s.baseURL, key), nil
+	}
+	return fmt.Sprintf("/uploads/%s", key), nil
 }
 
 func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Reader, _ int64, contentType string, filename string) (string, error) {
-	dest, err := s.writeAtomic(key, data)
-	if err != nil {
+	dest := filepath.Join(s.uploadDir, key)
+	if err := writeAtomic(dest, data); err != nil {
 		return "", err
 	}
 	if filename != "" {
@@ -253,7 +178,10 @@ func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Rea
 		}
 	}
 
-	return s.objectURL(key), nil
+	if s.baseURL != "" {
+		return fmt.Sprintf("%s/uploads/%s", s.baseURL, key), nil
+	}
+	return fmt.Sprintf("/uploads/%s", key), nil
 }
 
 // writeAtomic writes src through a temp file in the destination directory and
@@ -264,35 +192,31 @@ func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Rea
 // longer exists. With rename-into-place a failed write only discards its own
 // temp file and the existing object survives untouched. Both upload paths go
 // through here so neither can reintroduce the destructive shape.
-func (s *LocalStorage) writeAtomic(key string, src io.Reader) (string, error) {
-	dest, err := s.resolve(key)
-	if err != nil {
-		return "", fmt.Errorf("local storage write: %w", err)
-	}
+func writeAtomic(dest string, src io.Reader) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return "", fmt.Errorf("local storage MkdirAll: %w", err)
+		return fmt.Errorf("local storage MkdirAll: %w", err)
 	}
 	tmp := tempPath(dest)
 	// 0644 at open, matching the mode the direct write used (os.CreateTemp
 	// would make it 0600 and need a chmod that some mounts refuse).
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return "", fmt.Errorf("local storage create temp: %w", err)
+		return fmt.Errorf("local storage create temp: %w", err)
 	}
 	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("local storage stream copy: %w", err)
+		return fmt.Errorf("local storage stream copy: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("local storage Close: %w", err)
+		return fmt.Errorf("local storage Close: %w", err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("local storage Rename: %w", err)
+		return fmt.Errorf("local storage Rename: %w", err)
 	}
-	return dest, nil
+	return nil
 }
 
 // tempPath is the staging file writeAtomic renames into place. It is derived
@@ -314,8 +238,8 @@ func tempPath(dest string) string {
 
 // isInternalLocalPath reports whether key names one of the local backend's own
 // files — the .meta.json sidecar or a .<name>.tmp staging file — rather than an
-// object. Read paths take the key straight from the request URL, so both must
-// be unreachable: a staging file would otherwise expose a half-written body.
+// object. Both must be unreachable through readers: a staging file would
+// otherwise expose a half-written body.
 // Object keys are server-generated (UUID or hash basenames) and never start
 // with a dot, so a user uploading "notes.tmp" (key "<uuid>.tmp") is unaffected.
 func isInternalLocalPath(key string) bool {
@@ -326,63 +250,22 @@ func isInternalLocalPath(key string) bool {
 	return strings.HasPrefix(base, ".") && strings.HasSuffix(base, tempSuffix)
 }
 
-func (s *LocalStorage) GetFilePath(key string) (string, error) {
-	return s.resolve(key)
+func (s *LocalStorage) GetFilePath(key string) string {
+	return filepath.Join(s.uploadDir, key)
 }
 
-func (s *LocalStorage) ServeFile(w http.ResponseWriter, r *http.Request, filename string) {
-	// The sidecar and the staging file are implementation details of the local
-	// backend; refuse to serve them directly so /uploads/<key>.meta.json (or a
-	// half-written .<key>.tmp) doesn't become a stable read API. Comes before
-	// any disk work so a path-traversal attempt at a sibling can't trigger an
-	// out-of-tree read.
-	if isInternalLocalPath(filename) {
-		http.NotFound(w, r)
-		return
-	}
-
-	filePath, err := s.resolve(filename)
+// isUnder reports whether target resolves to a path inside dir (or equal to
+// it). Both inputs are passed through filepath.Clean so trailing slashes and
+// "." segments don't fool the comparison.
+func isUnder(dir, target string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(target))
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		return false
 	}
-	slog.Info("serving file", "filename", filename, "filepath", filePath)
-
-	// Mirror the S3 Upload path: when sidecar metadata exists for this key,
-	// set Content-Disposition with the original uploaded filename. Without
-	// it, browsers download the file under the storage-key basename (the
-	// UUID + extension) instead of the human-readable name the uploader
-	// chose. Uploads from before the sidecar landed have no .meta.json on
-	// disk and fall through to the existing behavior.
-	if meta, ok := s.readLocalMeta(filename); ok && meta.Filename != "" {
-		w.Header().Set("Content-Disposition", ContentDisposition(meta.ContentType, meta.Filename))
-	}
-
-	// Use http.ServeFile which has built-in path traversal protection
-	// It sanitizes the path and prevents access outside the directory
-	http.ServeFile(w, r, filePath)
-}
-
-func (s *LocalStorage) readLocalMeta(key string) (localMeta, bool) {
-	filePath, err := s.resolve(key)
-	if err != nil {
-		return localMeta{}, false
-	}
-	body, err := os.ReadFile(filePath + metaSuffix)
-	if err != nil {
-		return localMeta{}, false
-	}
-	var meta localMeta
-	if err := json.Unmarshal(body, &meta); err != nil {
-		return localMeta{}, false
-	}
-	return meta, true
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (s *LocalStorage) UploadFromReader(ctx context.Context, key string, reader io.Reader, contentType string, filename string) (string, error) {
-	if _, err := s.resolve(key); err != nil {
-		return "", fmt.Errorf("local storage UploadFromReader: %w", err)
-	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return "", fmt.Errorf("local storage ReadAll: %w", err)

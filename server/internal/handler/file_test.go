@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -139,7 +137,7 @@ func (m *mockStorage) PresignGet(_ context.Context, key string, _ time.Duration)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.presignCalls = append(m.presignCalls, key)
-	return "https://cdn.example.com/" + key + "?X-Amz-Signature=mock", nil
+	return "https://signed.example.com/" + key + "?X-Amz-Signature=mock", nil
 }
 func (m *mockStorage) PresignGetWithContentDisposition(_ context.Context, key string, _ time.Duration, contentDisposition string) (string, error) {
 	m.mu.Lock()
@@ -148,7 +146,7 @@ func (m *mockStorage) PresignGetWithContentDisposition(_ context.Context, key st
 	m.presignDispositions = append(m.presignDispositions, contentDisposition)
 	u := url.URL{
 		Scheme: "https",
-		Host:   "cdn.example.com",
+		Host:   "signed.example.com",
 		Path:   "/" + key,
 	}
 	q := u.Query()
@@ -1006,7 +1004,7 @@ func TestDownloadAttachment_BareNavigationServesMemberWithoutWorkspaceHeaders(t 
 // IDOR boundary: a stray attachment ID belonging to a workspace the
 // requester is NOT a member of must return 404, not 200 (would leak
 // bytes) and not 403 (would confirm the ID exists). Mirrors
-// ServeLocalUpload's deny shape.
+// the non-existent attachment response.
 func TestDownloadAttachment_BareNavigationDeniesNonMemberWith404(t *testing.T) {
 	if testPool == nil {
 		t.Skip("test database not available")
@@ -1786,7 +1784,7 @@ func TestIsTextPreviewable(t *testing.T) {
 // Matrix:
 //
 //   - public CDN durable URL ............... reuse a.Url verbatim
-//   - LocalStorage with PublicURL set ....... reuse a.Url (already absolute)
+//   - LocalStorage with PublicURL set ....... absolute API endpoint
 //   - CloudFront-signed mode ................ never reuse a.Url (raw S3),
 //                                              prefer absolute API endpoint
 //   - LocalStorage relative + PublicURL set . prefix to absolute API endpoint
@@ -2002,140 +2000,6 @@ func TestIsDurablePublicURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isDurablePublicURL(tc.url); got != tc.want {
 				t.Errorf("isDurablePublicURL(%q) = %v, want %v", tc.url, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestServeLocalUpload_RelaxesFrameAncestorsForPreview covers the self-hosted
-// local-disk case where document previews (PDF/HTML) are fetched straight from
-// the public /uploads/* static route. That route inherits the global
-// "frame-ancestors 'none'" CSP from the middleware, which blocks iframe
-// previews; ServeLocalUpload must overwrite it with the same relaxed preview
-// policy the /api/attachments download endpoint uses. See MUL-3821 / #4477.
-func TestServeLocalUpload_RelaxesFrameAncestorsForPreview(t *testing.T) {
-	dir := t.TempDir()
-	key := "workspaces/ws-1/preview.pdf"
-	full := filepath.Join(dir, filepath.FromSlash(key))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	const body = "%PDF-1.7 local-disk preview"
-	if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	t.Setenv("LOCAL_UPLOAD_DIR", dir)
-	t.Setenv("LOCAL_UPLOAD_BASE_URL", "")
-	local := storage.NewLocalStorageFromEnv()
-	if local == nil {
-		t.Fatal("NewLocalStorageFromEnv returned nil")
-	}
-
-	h := &Handler{
-		Storage: local,
-		cfg:     Config{AttachmentFrameAncestors: []string{"https://app.example.test"}},
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/uploads/"+key, nil)
-	w := httptest.NewRecorder()
-	// Simulate the global CSP middleware having already stamped the strict
-	// policy on the response before the static route runs.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
-
-	h.ServeLocalUpload(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
-	}
-	if got := w.Body.String(); got != body {
-		t.Fatalf("body = %q, want %q", got, body)
-	}
-	requireAttachmentPreviewCSP(t, w.Header(), "https://app.example.test")
-}
-
-// TestServeLocalUpload_NonLocalStorage404 guards the defensive branch: the
-// /uploads/* route is only registered under local storage, but the handler
-// must not serve anything when the backing store is not local disk.
-func TestServeLocalUpload_NonLocalStorage404(t *testing.T) {
-	h := &Handler{Storage: &mockStorage{}}
-	req := httptest.NewRequest(http.MethodGet, "/uploads/workspaces/ws-1/x.png", nil)
-	w := httptest.NewRecorder()
-	h.ServeLocalUpload(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
-}
-
-// TestLocalUploadRoute_RequiresSignatureOrMember covers who may read
-// /uploads/*. The app is reachable from the public internet, so only a
-// Multica-signed URL or a signed-in member of the key's workspace may read.
-func TestLocalUploadRoute_RequiresSignatureOrMember(t *testing.T) {
-	dir := t.TempDir()
-	foreignWorkspaceID := "00000000-0000-0000-0000-000000000099"
-	memberKey := "workspaces/" + testWorkspaceID + "/member.png"
-	foreignKey := "workspaces/" + foreignWorkspaceID + "/foreign.png"
-	userKey := "users/" + testUserID + "/avatar.png"
-	for _, key := range []string{memberKey, foreignKey, userKey} {
-		full := filepath.Join(dir, filepath.FromSlash(key))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.WriteFile(full, []byte("img"), 0o644); err != nil {
-			t.Fatalf("write file: %v", err)
-		}
-	}
-	t.Setenv("LOCAL_UPLOAD_DIR", dir)
-	t.Setenv("LOCAL_UPLOAD_BASE_URL", "")
-	t.Setenv("MEDIA_SIGNING_SECRET", "test-media-secret")
-	local := storage.NewLocalStorageFromEnv()
-	origStorage := testHandler.Storage
-	testHandler.Storage = local
-	defer func() { testHandler.Storage = origStorage }()
-
-	// Stands in for middleware.Auth: rejects anonymous requests and stamps
-	// X-User-ID from the test identity.
-	requireAuth := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			userID := r.Header.Get("X-Test-User")
-			if userID == "" {
-				http.Error(w, `{"error":"missing authorization"}`, http.StatusUnauthorized)
-				return
-			}
-			r.Header.Set("X-User-ID", userID)
-			next.ServeHTTP(w, r)
-		})
-	}
-	route := testHandler.LocalUploadRoute(requireAuth)
-	member := map[string]string{"X-Test-User": testUserID}
-
-	tests := []struct {
-		name    string
-		target  string
-		headers map[string]string
-		want    int
-	}{
-		{"anonymous unsigned", "/uploads/" + memberKey, nil, http.StatusUnauthorized},
-		{"anonymous signed", local.ObjectURL(foreignKey), nil, http.StatusOK},
-		{"anonymous bad signature", "/uploads/" + memberKey + "?sig=deadbeef", nil, http.StatusUnauthorized},
-		{"member unsigned", "/uploads/" + memberKey, member, http.StatusOK},
-		{"non-member unsigned", "/uploads/" + foreignKey, member, http.StatusForbidden},
-		{"signed-in user key", "/uploads/" + userKey, member, http.StatusOK},
-		{"traversal into foreign workspace", "/uploads/users/" + testUserID + "/../../" + foreignKey, member, http.StatusNotFound},
-		{"task token bound to another workspace", "/uploads/" + memberKey, map[string]string{"X-Test-User": testUserID, "X-Actor-Source": "task_token", "X-Workspace-ID": foreignWorkspaceID}, http.StatusForbidden},
-		{"funnel unsigned", "/uploads/" + memberKey, map[string]string{"X-Test-User": testUserID, "X-Multica-Public": "1"}, http.StatusForbidden},
-		{"funnel signed", local.ObjectURL(memberKey), map[string]string{"X-Multica-Public": "1"}, http.StatusOK},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
-			for k, v := range tt.headers {
-				req.Header.Set(k, v)
-			}
-			w := httptest.NewRecorder()
-			route(w, req)
-			if w.Code != tt.want {
-				t.Fatalf("GET %s: status = %d, want %d; body=%q", tt.target, w.Code, tt.want, w.Body.String())
 			}
 		})
 	}

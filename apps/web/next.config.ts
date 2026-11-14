@@ -48,6 +48,10 @@ const nextConfig: NextConfig = {
   images: {
     formats: ["image/avif", "image/webp"],
     qualities: [75, 80, 85],
+    localPatterns: [
+      { pathname: "/images/**", search: "" },
+      { pathname: "/usecases/**", search: "" },
+    ],
   },
   async rewrites() {
     return {
@@ -86,10 +90,6 @@ const nextConfig: NextConfig = {
             {
               source: "/auth/:path*",
               destination: `${remoteApiUrl}/auth/:path*`,
-            },
-            {
-              source: "/uploads/:path*",
-              destination: `${remoteApiUrl}/uploads/:path*`,
             },
           ]
         : [],
