@@ -949,44 +949,17 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	return args
 }
 
-// resolveDaemonServerURL determines which backend URL the daemon should
-// connect to, with the following precedence:
-//
-//  1. an explicit --server-url flag (highest);
-//  2. a named profile's stored server_url;
-//  3. the MULTICA_SERVER_URL environment variable;
-//  4. the default profile's stored server_url.
-//
-// A named profile carries a deliberately-chosen backend (e.g. a self-hosted
-// Tailscale funnel URL saved by `multica setup self-host`). It must win over an
-// ambient MULTICA_SERVER_URL, which build tooling injects as a localhost
-// fallback (the Makefile sets `MULTICA_SERVER_URL ?= ws://localhost:PORT/ws`
-// and exports it). Without this ordering, `make daemon --profile <self-host>`
-// would silently connect the daemon to localhost instead of the configured
-// remote backend. The default profile keeps the historical order (env before
-// stored config) so plain local-dev workflows are unaffected.
-//
-// An empty return lets daemon.LoadConfig fall back to its own default
-// (ws://localhost:8080/ws).
+// resolveDaemonServerURL resolves the server URL the daemon will talk to,
+// in the same precedence order the foreground daemon uses: --server-url flag,
+// MULTICA_SERVER_URL env, then the stored CLI config for the profile.
 func resolveDaemonServerURL(cmd *cobra.Command, profile string) string {
-	if cmd.Flags().Changed("server-url") {
-		if v, _ := cmd.Flags().GetString("server-url"); strings.TrimSpace(v) != "" {
-			return v
+	serverURL := cli.FlagOrEnv(cmd, "server-url", "MULTICA_SERVER_URL", "")
+	if serverURL == "" {
+		if c, err := cli.LoadCLIConfigForProfile(profile); err == nil && c.ServerURL != "" {
+			serverURL = c.ServerURL
 		}
 	}
-
-	var cfgServerURL string
-	if c, err := cli.LoadCLIConfigForProfile(profile); err == nil {
-		cfgServerURL = strings.TrimSpace(c.ServerURL)
-	}
-
-	if profile != "" && cfgServerURL != "" {
-		return cfgServerURL
-	}
-	if v := strings.TrimSpace(os.Getenv("MULTICA_SERVER_URL")); v != "" {
-		return v
-	}
-	return cfgServerURL
+	return serverURL
 }
 
 func runDaemonForeground(cmd *cobra.Command) error {

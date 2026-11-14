@@ -895,6 +895,25 @@
       "chat_replies": {
         "label": "Включать ответы в чате"
       }
+    },
+    "delivery": {
+      "title": "Доставка",
+      "description": "Отправлять важные непрочитанные уведомления за пределы Multica.",
+      "email": {
+        "label": "Уведомления по эл. почте",
+        "description": "Упоминания, назначения и агенты, которым нужен ваш ответ, если они не прочитаны через 10 минут"
+      },
+      "google_chat": {
+        "label": "Google Chat",
+        "description": "Публиковать те же непрочитанные уведомления в пространство Google Chat.",
+        "input_label": "URL вебхука Google Chat",
+        "placeholder": "https://chat.googleapis.com/v1/spaces/…",
+        "how_to": "Пространство Google Chat → Приложения и интеграции → Вебхуки → Добавить вебхук → вставьте URL.",
+        "save": "Сохранить",
+        "cancel": "Отмена",
+        "replace": "Заменить",
+        "remove": "Удалить"
+      }
     }
   },
   "tokens": {

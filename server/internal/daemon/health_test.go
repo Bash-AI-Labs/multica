@@ -762,6 +762,7 @@ func createNamedDaemonTestRepo(t *testing.T, label string) string {
 	}
 	runDaemonTestGit(t, "-C", path, "add", "identity.txt")
 	runDaemonTestGit(t, "-C", path, "commit", "-m", label)
+	t.Cleanup(repocache.TrustLocalRepositoryForTesting(path))
 	return path
 }
 

@@ -146,7 +146,7 @@ func (m *mockStorage) PresignGetWithContentDisposition(_ context.Context, key st
 	m.presignDispositions = append(m.presignDispositions, contentDisposition)
 	u := url.URL{
 		Scheme: "https",
-		Host:   "signed.example.com",
+		Host:   "cdn.example.com",
 		Path:   "/" + key,
 	}
 	q := u.Query()

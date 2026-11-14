@@ -1,7 +1,7 @@
 {
   "name": "@multica/mcp",
   "version": "0.1.0",
-  "description": "MCP server for Multica — file and manage work items from any AI agent",
+  "description": "MCP server for Multica \u2014 file and manage work items from any AI agent",
   "type": "module",
   "bin": {
     "multica-mcp": "./dist/index.js"
@@ -15,7 +15,8 @@
     "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "catalog:"
   }
 }

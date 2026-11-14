@@ -24,12 +24,7 @@ const exemptWorkspaces = new Set(["apps/mobile"]);
 
 // Known drift that needs its own upgrade. Each entry must still be a live
 // violation; the check fails once the drift is gone so the entry gets removed.
-export const allowlist = new Map([
-  [
-    "@vitejs/plugin-react",
-    "apps/desktop bundles with plugin-react 5; moving it to the catalog's 6 changes how pnpm resolves vite for electron-vite and needs its own verification.",
-  ],
-]);
+export const allowlist = new Map([]);
 
 const unquote = (value) => value.trim().replace(/^(['"])(.*)\1$/, "$2");
 

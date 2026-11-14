@@ -913,12 +913,15 @@ importers:
         specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.5.0
       tsx:
         specifier: ^4.19.4
         version: 4.23.15
       typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
+        specifier: 'catalog:'
+        version: '@typescript/typescript6@6.0.2'
 
   packages/plugin-sdk:
     devDependencies:
@@ -11681,11 +11684,6 @@ packages:
       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
       typescript: '>=4.8.4 <6.1.0'
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
@@ -16586,7 +16584,7 @@ snapshots:
 
   '@types/fs-extra@9.0.13':
     dependencies:
-      '@types/node': 25.5.0
+      '@types/node': 26.6.6
 
   '@types/geojson@7946.0.16': {}
 
@@ -16646,7 +16644,7 @@ snapshots:
 
   '@types/pg@8.20.0':
     dependencies:
-      '@types/node': 25.5.0
+      '@types/node': 26.6.6
       pg-protocol: 1.13.0
       pg-types: 2.2.0
 
@@ -24232,8 +24230,6 @@ snapshots:
       typescript: 6.0.3
     transitivePeerDependencies:
       - supports-color
-
-  typescript@5.9.3: {}
 
   typescript@6.0.3: {}
 
