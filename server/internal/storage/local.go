@@ -95,9 +95,9 @@ func (s *LocalStorage) GetReader(ctx context.Context, key string) (io.ReadCloser
 	if isInternalLocalPath(key) {
 		return nil, fmt.Errorf("local GetReader: refusing to serve internal key %q", key)
 	}
-	filePath := filepath.Join(s.uploadDir, key)
-	if !isUnder(s.uploadDir, filePath) {
-		return nil, fmt.Errorf("local GetReader: key escapes upload dir: %q", key)
+	filePath, err := s.resolve(key)
+	if err != nil {
+		return nil, fmt.Errorf("local GetReader: %w", err)
 	}
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -122,7 +122,10 @@ func (s *LocalStorage) DeleteObject(_ context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-	filePath := filepath.Join(s.uploadDir, key)
+	filePath, err := s.resolve(key)
+	if err != nil {
+		return err
+	}
 	for _, p := range []string{filePath, filePath + metaSuffix, tempPath(filePath)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
@@ -148,7 +151,10 @@ func (s *LocalStorage) DeleteKeys(ctx context.Context, keys []string) {
 }
 
 func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {
-	dest := filepath.Join(s.uploadDir, key)
+	dest, err := s.resolve(key)
+	if err != nil {
+		return "", err
+	}
 	if err := writeAtomic(dest, bytes.NewReader(data)); err != nil {
 		return "", err
 	}
@@ -167,7 +173,10 @@ func (s *LocalStorage) Upload(ctx context.Context, key string, data []byte, cont
 }
 
 func (s *LocalStorage) UploadStream(ctx context.Context, key string, data io.Reader, _ int64, contentType string, filename string) (string, error) {
-	dest := filepath.Join(s.uploadDir, key)
+	dest, err := s.resolve(key)
+	if err != nil {
+		return "", err
+	}
 	if err := writeAtomic(dest, data); err != nil {
 		return "", err
 	}
@@ -254,15 +263,22 @@ func (s *LocalStorage) GetFilePath(key string) string {
 	return filepath.Join(s.uploadDir, key)
 }
 
-// isUnder reports whether target resolves to a path inside dir (or equal to
-// it). Both inputs are passed through filepath.Clean so trailing slashes and
-// "." segments don't fool the comparison.
-func isUnder(dir, target string) bool {
-	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(target))
-	if err != nil {
-		return false
+// resolve validates an object key and returns its path below uploadDir. Every
+// read, write and delete goes through it so a stored or crafted key can never
+// touch files outside the upload dir. filepath.IsLocal treats backslashes as
+// ordinary filename characters on Unix; that is intentional because only the
+// platform path separator can traverse directories.
+func (s *LocalStorage) resolve(key string) (string, error) {
+	if key == "" || !filepath.IsLocal(key) {
+		return "", fmt.Errorf("local storage: invalid key %q", key)
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	root := filepath.Clean(s.uploadDir)
+	target := filepath.Join(root, key)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("local storage: key escapes upload dir: %q", key)
+	}
+	return target, nil
 }
 
 func (s *LocalStorage) UploadFromReader(ctx context.Context, key string, reader io.Reader, contentType string, filename string) (string, error) {
