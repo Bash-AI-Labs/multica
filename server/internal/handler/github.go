@@ -2247,6 +2247,7 @@ func (h *Handler) triggerAgentForPRComment(ctx context.Context, installationID i
 		if err != nil || len(issueIDs) == 0 {
 			continue
 		}
+		selfAuthor := h.prCommentSelfAuthor(ctx, pr, issueIDs, commentAuthor)
 
 		for _, issueID := range issueIDs {
 			issue, err := h.Queries.GetIssue(ctx, issueID)
@@ -2257,6 +2258,14 @@ func (h *Handler) triggerAgentForPRComment(ctx context.Context, installationID i
 				continue
 			}
 			if issue.Status == "done" || issue.Status == "cancelled" {
+				continue
+			}
+			if selfAuthor.Valid && issue.AssigneeID == selfAuthor {
+				slog.Info("github: skipped agent's own pr comment",
+					"issue_id", uuidToString(issue.ID),
+					"pr", prNumber,
+					"repo", repo.FullName,
+				)
 				continue
 			}
 

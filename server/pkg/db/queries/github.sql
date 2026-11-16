@@ -255,6 +255,20 @@ LIMIT 1;
 SELECT issue_id FROM issue_pull_request
 WHERE pull_request_id = $1;
 
+-- name: ListRecentToolInputsForIssues :many
+-- Tool calls made since @since by runs on the given issues that were still
+-- active then. Used to tell which agent posted a PR comment under the shared
+-- GitHub login.
+SELECT t.agent_id, tm.input
+FROM agent_task_queue t
+JOIN task_message tm ON tm.task_id = t.id
+WHERE t.issue_id = ANY(@issue_ids::uuid[])
+  AND t.started_at IS NOT NULL
+  AND (t.completed_at IS NULL OR t.completed_at >= @since::timestamptz)
+  AND tm.type = 'tool_use'
+  AND tm.input IS NOT NULL
+  AND tm.created_at >= @since::timestamptz;
+
 -- =====================
 -- Issue ↔ Pull Request link
 -- =====================
