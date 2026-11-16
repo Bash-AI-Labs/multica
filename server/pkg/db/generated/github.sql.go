@@ -828,6 +828,51 @@ func (q *Queries) ListPullRequestsByIssue(ctx context.Context, issueID pgtype.UU
 	return items, nil
 }
 
+const listRecentToolInputsForIssues = `-- name: ListRecentToolInputsForIssues :many
+SELECT t.agent_id, tm.input
+FROM agent_task_queue t
+JOIN task_message tm ON tm.task_id = t.id
+WHERE t.issue_id = ANY($1::uuid[])
+  AND t.started_at IS NOT NULL
+  AND (t.completed_at IS NULL OR t.completed_at >= $2::timestamptz)
+  AND tm.type = 'tool_use'
+  AND tm.input IS NOT NULL
+  AND tm.created_at >= $2::timestamptz
+`
+
+type ListRecentToolInputsForIssuesParams struct {
+	IssueIds []pgtype.UUID      `json:"issue_ids"`
+	Since    pgtype.Timestamptz `json:"since"`
+}
+
+type ListRecentToolInputsForIssuesRow struct {
+	AgentID pgtype.UUID `json:"agent_id"`
+	Input   []byte      `json:"input"`
+}
+
+// Tool calls made since @since by runs on the given issues that were still
+// active then. Used to tell which agent posted a PR comment under the shared
+// GitHub login.
+func (q *Queries) ListRecentToolInputsForIssues(ctx context.Context, arg ListRecentToolInputsForIssuesParams) ([]ListRecentToolInputsForIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listRecentToolInputsForIssues, arg.IssueIds, arg.Since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRecentToolInputsForIssuesRow{}
+	for rows.Next() {
+		var i ListRecentToolInputsForIssuesRow
+		if err := rows.Scan(&i.AgentID, &i.Input); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const unlinkIssueFromPullRequest = `-- name: UnlinkIssueFromPullRequest :execrows
 DELETE FROM issue_pull_request
 WHERE issue_id = $1 AND pull_request_id = $2
