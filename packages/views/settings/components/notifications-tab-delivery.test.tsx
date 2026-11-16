@@ -3,7 +3,7 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multica/core/i18n/react";
@@ -28,7 +28,8 @@ vi.mock("@multica/core/paths", () => ({
   }),
   useRequiredWorkspaceSlug: () => "acme",
 }));
-vi.mock("@multica/core/api", () => ({
+vi.mock("@multica/core/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@multica/core/api")>()),
   api: {
     getNotificationPreferences: mockGetNotificationPreferences,
     updateNotificationPreferences: mockUpdateNotificationPreferences,
@@ -43,6 +44,7 @@ vi.mock("./browser-notification-setting", () => ({
   BrowserNotificationSetting: () => null,
 }));
 
+import { ApiError } from "@multica/core/api";
 import { NotificationsTab } from "./notifications-tab";
 
 const TEST_RESOURCES = { en: { common: enCommon, settings: enSettings } };
@@ -126,12 +128,24 @@ describe("NotificationsTab delivery settings", () => {
         "acme",
       );
     });
-    expect(await screen.findByText(MASKED_WEBHOOK)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Connected to space AAAA…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(MASKED_WEBHOOK)).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Replace" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText("Remove Google Chat webhook?"),
+    ).toBeInTheDocument();
+    expect(mockUpdateNotificationPreferences).not.toHaveBeenCalledWith(
+      { google_chat_webhook: "" },
+      "acme",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
     await waitFor(() => {
       expect(mockUpdateNotificationPreferences).toHaveBeenCalledWith(
         { google_chat_webhook: "" },
@@ -140,25 +154,28 @@ describe("NotificationsTab delivery settings", () => {
     });
   });
 
-  it("shows a server confirmation failure through the existing toast", async () => {
+  it.each([
+    ["google_chat_invalid_url", "Enter a Google Chat webhook URL starting with https://chat.googleapis.com/v1/spaces/."],
+    ["google_chat_missing_credentials", "The webhook URL must include both key and token. Copy the complete URL from Google Chat."],
+    ["google_chat_connection_failed", "Could not connect to Google Chat. Check the webhook URL and try again."],
+  ])("shows %s inline in the user's language", async (code, message) => {
     const user = userEvent.setup();
     mockUpdateNotificationPreferences.mockRejectedValueOnce(
-      new Error("failed to connect Google Chat webhook"),
+      new ApiError("raw English server message", 400, "Bad Request", { code }),
     );
     render(<NotificationsTab />, { wrapper: Wrapper });
 
-    await user.type(
-      await screen.findByRole("textbox", {
-        name: "Google Chat webhook URL",
-      }),
-      "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=test&token=test",
-    );
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(mockToastError).toHaveBeenCalledWith(
-        "failed to connect Google Chat webhook",
-      );
+    const input = await screen.findByRole("textbox", {
+      name: "Google Chat webhook URL",
     });
+    await user.type(
+      input,
+      "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=test&token=test{Enter}",
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByText("raw English server message")).not.toBeInTheDocument();
+    expect(mockToastError).not.toHaveBeenCalled();
   });
 });

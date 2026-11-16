@@ -98,6 +98,33 @@ func TestNotificationMessageBuildersEscapeAndDescribeItems(t *testing.T) {
 	}
 }
 
+func TestNotificationMessagesDescribeChangesFromDetails(t *testing.T) {
+	statusRow := deliveryRow(pgUUID(1), pgUUID(3), "status_changed", 12)
+	statusRow.Details = []byte(`{"from":"todo","to":"in_review"}`)
+	reactionRow := deliveryRow(pgUUID(1), pgUUID(3), "reaction_added", 13)
+	reactionRow.Details = []byte(`{"emoji":"<b>👍</b>"}`)
+	batches := groupNotificationDeliveries([]db.ListPendingNotificationDeliveriesRow{statusRow, reactionRow}, "https://app.example.test")
+	if len(batches) != 1 || len(batches[0].Items) != 2 {
+		t.Fatalf("batches = %+v", batches)
+	}
+
+	chat := buildGoogleChatNotification(batches[0])
+	_, email := buildNotificationEmail(batches[0])
+	for _, want := range []string{
+		"*Dillon* changed status from todo to in_review on <https://app.example.test/bash/issues/BAS-12|",
+		"*Dillon* reacted &lt;b&gt;👍&lt;/b&gt; on <https://app.example.test/bash/issues/BAS-13|",
+	} {
+		if !strings.Contains(chat, want) {
+			t.Fatalf("Google Chat message missing %q:\n%s", want, chat)
+		}
+	}
+	for _, want := range []string{"changed status from todo to in_review on", "reacted &lt;b&gt;👍&lt;/b&gt; on"} {
+		if !strings.Contains(email, want) {
+			t.Fatalf("email body missing %q:\n%s", want, email)
+		}
+	}
+}
+
 func TestNotificationDeliveryConfigUsesEmptyDefaultsAndAcceptsZeroDelay(t *testing.T) {
 	t.Setenv("NOTIFICATION_DELIVERY_ENABLED", "")
 	t.Setenv("NOTIFICATION_DELIVERY_DELAY", "")

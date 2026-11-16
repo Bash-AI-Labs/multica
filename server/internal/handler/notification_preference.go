@@ -170,7 +170,11 @@ func (h *Handler) prepareNotificationPreferenceUpdate(
 			next["google_chat_webhook"] = currentWebhook
 			incomingWebhook = currentWebhook
 		} else if _, err := service.ValidateGoogleChatWebhookURL(incomingWebhook); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			code := "google_chat_invalid_url"
+			if errors.Is(err, service.ErrGoogleChatMissingCredentials) {
+				code = "google_chat_missing_credentials"
+			}
+			writeErrorCode(w, http.StatusBadRequest, code, err.Error())
 			return nil, false
 		}
 	}
@@ -183,7 +187,7 @@ func (h *Handler) prepareNotificationPreferenceUpdate(
 			return nil, false
 		}
 		if h.NotificationChatSender == nil {
-			writeError(w, http.StatusBadRequest, "Google Chat delivery is unavailable")
+			writeErrorCode(w, http.StatusBadRequest, "google_chat_connection_failed", "Google Chat delivery is unavailable")
 			return nil, false
 		}
 		if err := h.NotificationChatSender.Send(
@@ -191,7 +195,7 @@ func (h *Handler) prepareNotificationPreferenceUpdate(
 			incomingWebhook,
 			service.BuildGoogleChatConfirmation(workspace.Name),
 		); err != nil {
-			writeError(w, http.StatusBadRequest, "failed to connect Google Chat webhook; verify the URL and try again")
+			writeErrorCode(w, http.StatusBadRequest, "google_chat_connection_failed", "failed to connect Google Chat webhook; verify the URL and try again")
 			return nil, false
 		}
 	}

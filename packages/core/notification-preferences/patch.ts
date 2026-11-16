@@ -67,13 +67,8 @@ export function applyNotificationPreferencePatch(
     }
   }
 
-  if (patch.google_chat_webhook !== undefined) {
-    if (patch.google_chat_webhook === "") {
-      delete next.google_chat_webhook;
-    } else {
-      next.google_chat_webhook = patch.google_chat_webhook;
-    }
-  }
+  // Webhook writes wait for the server, which tests the URL and returns it
+  // masked; the raw URL (with its key and token) never enters the cache.
 
   return next;
 }
@@ -103,18 +98,6 @@ export function rollbackNotificationPreferencePatch(
       delete next[key];
     } else {
       next[key] = previousValue;
-    }
-  }
-
-  if (
-    patch.google_chat_webhook !== undefined &&
-    (current.google_chat_webhook ?? "") === patch.google_chat_webhook
-  ) {
-    const previousWebhook = previous.google_chat_webhook ?? "";
-    if (previousWebhook === "") {
-      delete next.google_chat_webhook;
-    } else {
-      next.google_chat_webhook = previousWebhook;
     }
   }
 

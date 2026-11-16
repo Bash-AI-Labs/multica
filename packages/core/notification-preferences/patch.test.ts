@@ -81,7 +81,7 @@ describe("notification preference patches", () => {
     ).toEqual({});
   });
 
-  it("sets, clears, and rolls back Google Chat webhook strings", () => {
+  it("derives Google Chat webhook changes", () => {
     const masked =
       "https://chat.googleapis.com/v1/spaces/AAAA…/messages?••••";
     const replacement =
@@ -99,19 +99,33 @@ describe("notification preference patches", () => {
         {},
       ),
     ).toEqual({ google_chat_webhook: "" });
-    expect(
-      applyNotificationPreferencePatch(
-        { google_chat_webhook: masked },
-        { google_chat_webhook: "" },
-      ),
-    ).toEqual({});
+  });
+
+  it("never places a raw Google Chat webhook in the optimistic cache", () => {
+    const raw =
+      "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t";
+    const applied = applyNotificationPreferencePatch({}, {
+      google_chat_webhook: raw,
+    });
+
+    expect(applied.google_chat_webhook).toBeUndefined();
+    expect(JSON.stringify(applied)).not.toContain("token=t");
     expect(
       rollbackNotificationPreferencePatch(
-        { google_chat_webhook: replacement },
-        { google_chat_webhook: replacement },
-        { google_chat_webhook: masked },
+        applied,
+        { google_chat_webhook: raw },
+        {},
       ),
-    ).toEqual({ google_chat_webhook: masked });
+    ).toEqual({});
+  });
+
+  it("keeps the confirmed webhook while replacing or removing it", () => {
+    const current = { google_chat_webhook: "masked", comments: "muted" } as const;
+    for (const webhook of ["replacement", ""]) {
+      expect(applyNotificationPreferencePatch(current, {
+        google_chat_webhook: webhook,
+      })).toEqual(current);
+    }
   });
 
   it("does not roll back a key that a later mutation already changed", () => {

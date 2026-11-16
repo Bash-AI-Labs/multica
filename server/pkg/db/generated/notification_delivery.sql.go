@@ -25,7 +25,9 @@ SELECT
     w.issue_prefix,
     issue.number AS issue_number,
     issue.title AS issue_title,
-    COALESCE(actor_agent.name, actor_user.name, 'Someone') AS actor_name,
+    CASE WHEN i.actor_type = 'system' THEN 'Multica'
+         ELSE COALESCE(actor_agent.name, actor_user.name, 'Someone') END::text AS actor_name,
+    COALESCE(i.details, '{}'::jsonb) AS details,
     COALESCE(preference.preferences, '{}'::jsonb) AS preferences
 FROM inbox_item i
 JOIN "user" u
@@ -77,6 +79,7 @@ type ListPendingNotificationDeliveriesRow struct {
 	IssueNumber    pgtype.Int4        `json:"issue_number"`
 	IssueTitle     pgtype.Text        `json:"issue_title"`
 	ActorName      string             `json:"actor_name"`
+	Details        []byte             `json:"details"`
 	Preferences    []byte             `json:"preferences"`
 }
 
@@ -103,6 +106,7 @@ func (q *Queries) ListPendingNotificationDeliveries(ctx context.Context, arg Lis
 			&i.IssueNumber,
 			&i.IssueTitle,
 			&i.ActorName,
+			&i.Details,
 			&i.Preferences,
 		); err != nil {
 			return nil, err

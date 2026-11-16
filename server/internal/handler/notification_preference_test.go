@@ -227,12 +227,13 @@ func TestNotificationPreferenceGoogleChatValidation(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
+		code string
 	}{
-		{"scheme", "http://chat.googleapis.com/v1/spaces/AAAA/messages?key=x&token=y"},
-		{"host", "https://example.com/v1/spaces/AAAA/messages?key=x&token=y"},
-		{"port", "https://chat.googleapis.com:443/v1/spaces/AAAA/messages?key=x&token=y"},
-		{"path", "https://chat.googleapis.com/v1/spaces/AAAA?key=x&token=y"},
-		{"missing token", "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=x"},
+		{"scheme", "http://chat.googleapis.com/v1/spaces/AAAA/messages?key=x&token=y", "google_chat_invalid_url"},
+		{"host", "https://example.com/v1/spaces/AAAA/messages?key=x&token=y", "google_chat_invalid_url"},
+		{"port", "https://chat.googleapis.com:443/v1/spaces/AAAA/messages?key=x&token=y", "google_chat_invalid_url"},
+		{"path", "https://chat.googleapis.com/v1/spaces/AAAA?key=x&token=y", "google_chat_invalid_url"},
+		{"missing token", "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=x", "google_chat_missing_credentials"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -240,11 +241,17 @@ func TestNotificationPreferenceGoogleChatValidation(t *testing.T) {
 			sender := &fakePreferenceChatSender{}
 			usePreferenceChatSender(t, sender)
 
+			var response struct {
+				Code string `json:"code"`
+			}
 			testutil.Call(t, testHandler.PatchNotificationPreferences,
 				notificationPreferenceRequest(t, http.MethodPatch, map[string]string{
 					"google_chat_webhook": test.url,
 				}),
-			).Want(http.StatusBadRequest)
+			).Want(http.StatusBadRequest).JSON(&response)
+			if response.Code != test.code {
+				t.Fatalf("error code = %q, want %q", response.Code, test.code)
+			}
 			if sender.calls != 0 {
 				t.Fatalf("confirmation calls = %d, want 0", sender.calls)
 			}
@@ -394,7 +401,7 @@ func TestNotificationPreferenceGoogleChatConfirmationFailureDoesNotPersist(t *te
 			"google_chat_webhook": webhook,
 		}),
 	).Want(http.StatusBadRequest)
-	if !strings.Contains(response.Text(), "failed to connect Google Chat webhook") {
+	if !strings.Contains(response.Text(), `"code":"google_chat_connection_failed"`) {
 		t.Fatalf("response = %s", response.Text())
 	}
 	_, err := testHandler.Queries.GetNotificationPreference(context.Background(), db.GetNotificationPreferenceParams{

@@ -244,6 +244,7 @@ func (s *NotificationDeliveryService) DeliverAt(ctx context.Context, now time.Ti
 type notificationDeliveryItem struct {
 	Type            string
 	ActorName       string
+	Details         map[string]string
 	IssueIdentifier string
 	IssueTitle      string
 	IssueURL        string
@@ -302,9 +303,21 @@ func groupNotificationDeliveries(
 		if row.IssueTitle.Valid {
 			issueTitle = row.IssueTitle.String
 		}
+		details := map[string]string{}
+		if len(row.Details) != 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(row.Details, &raw); err == nil {
+				for key, value := range raw {
+					if text, ok := value.(string); ok {
+						details[key] = text
+					}
+				}
+			}
+		}
 		batches[index].Items = append(batches[index].Items, notificationDeliveryItem{
 			Type:            row.Type,
 			ActorName:       row.ActorName,
+			Details:         details,
 			IssueIdentifier: identifier,
 			IssueTitle:      issueTitle,
 			IssueURL:        issueURL,
@@ -324,14 +337,59 @@ func notificationSettingsURL(appURL, workspaceSlug string) string {
 		url.PathEscape(workspaceSlug) + "/settings"
 }
 
+// notificationAction is the phrase between the actor and the issue label:
+// "<actor> <action> <issue>".
 func notificationAction(item notificationDeliveryItem) string {
 	switch item.Type {
 	case "mentioned":
 		return "mentioned you in"
 	case "issue_assigned":
 		return "assigned you"
+	case "unassigned":
+		return "unassigned you from"
+	case "assignee_changed":
+		return "changed the assignee of"
 	case "agent_blocked":
 		return "needs your input on"
+	case "new_comment":
+		return "commented on"
+	case "issue_created":
+		return "created"
+	case "issue_subscribed":
+		return "subscribed you to"
+	case "review_requested":
+		return "requested your review on"
+	case "status_changed", "priority_changed", "start_date_changed", "due_date_changed":
+		field := strings.TrimSuffix(strings.ReplaceAll(item.Type, "_", " "), " changed")
+		from, to := item.Details["from"], item.Details["to"]
+		if from == "" {
+			from = "unset"
+		}
+		if to == "" {
+			to = "unset"
+		}
+		return fmt.Sprintf("changed %s from %s to %s on", field, from, to)
+	case "reaction_added":
+		if emoji := item.Details["emoji"]; emoji != "" {
+			return "reacted " + emoji + " on"
+		}
+		return "reacted on"
+	case "task_failed", "quick_create_failed":
+		return "had a failed run on"
+	case "task_completed", "agent_completed", "quick_create_done":
+		return "completed a run on"
+	case "app_action_requested", "app_action_reminder":
+		return "needs your approval on"
+	case "app_connect_requested":
+		return "needs you to connect an app for"
+	case "app_action_result":
+		return "reported an app action result on"
+	case "children_done":
+		return "finished all sub-issues of"
+	case "autopilot_paused":
+		return "paused autopilot on"
+	case "autopilot_quota_exceeded":
+		return "hit the autopilot quota on"
 	default:
 		return "sent you a notification about"
 	}
@@ -366,7 +424,7 @@ func buildNotificationEmail(batch notificationDeliveryBatch) (string, string) {
 		fmt.Fprintf(&items,
 			`<li style="margin: 0 0 12px;"><strong>%s</strong> %s %s</li>`,
 			safeActor,
-			notificationAction(item),
+			html.EscapeString(notificationAction(item)),
 			label,
 		)
 	}
@@ -425,7 +483,7 @@ func buildGoogleChatNotification(batch notificationDeliveryBatch) string {
 		}
 		fmt.Fprintf(&message, "• *%s* %s %s\n",
 			EscapeGoogleChatText(item.ActorName),
-			notificationAction(item),
+			EscapeGoogleChatText(notificationAction(item)),
 			label,
 		)
 	}
@@ -446,10 +504,15 @@ func BuildGoogleChatConfirmation(workspaceName string) string {
 	)
 }
 
+var (
+	ErrGoogleChatInvalidWebhookURL  = errors.New("Google Chat webhook must use https://chat.googleapis.com/v1/spaces/{space}/messages without a port, userinfo, or fragment")
+	ErrGoogleChatMissingCredentials = errors.New("Google Chat webhook must include non-empty key and token parameters")
+)
+
 func ValidateGoogleChatWebhookURL(raw string) (*url.URL, error) {
 	endpoint, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return nil, errors.New("Google Chat webhook URL is invalid")
+		return nil, ErrGoogleChatInvalidWebhookURL
 	}
 	if endpoint.Scheme != "https" ||
 		!strings.EqualFold(endpoint.Hostname(), "chat.googleapis.com") ||
@@ -457,14 +520,14 @@ func ValidateGoogleChatWebhookURL(raw string) (*url.URL, error) {
 		endpoint.User != nil ||
 		endpoint.Port() != "" ||
 		endpoint.Fragment != "" {
-		return nil, errors.New("Google Chat webhook must use https://chat.googleapis.com without a port, userinfo, or fragment")
+		return nil, ErrGoogleChatInvalidWebhookURL
 	}
 	if !googleChatWebhookPathPattern.MatchString(endpoint.EscapedPath()) {
-		return nil, errors.New("Google Chat webhook path must match /v1/spaces/{space}/messages")
+		return nil, ErrGoogleChatInvalidWebhookURL
 	}
 	query := endpoint.Query()
 	if strings.TrimSpace(query.Get("key")) == "" || strings.TrimSpace(query.Get("token")) == "" {
-		return nil, errors.New("Google Chat webhook must include non-empty key and token parameters")
+		return nil, ErrGoogleChatMissingCredentials
 	}
 	return endpoint, nil
 }
