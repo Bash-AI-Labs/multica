@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -27,16 +29,21 @@ const (
 	defaultNotificationDeliveryDelay = 10 * time.Minute
 	notificationDeliveryTickInterval = time.Minute
 	googleChatRequestTimeout         = 10 * time.Second
+	googleChatMessageRuneBudget      = 4000
+	notificationFieldRuneLimit       = 200
 )
 
 var (
-	defaultNotificationDeliveryTypes = []string{"mentioned", "issue_assigned", "agent_blocked"}
-	googleChatWebhookPathPattern     = regexp.MustCompile(`^/v1/spaces/([A-Za-z0-9_-]+)/messages$`)
+	googleChatWebhookPathPattern = regexp.MustCompile(`^/v1/spaces/([A-Za-z0-9_-]+)/messages$`)
+	// markdownLink matches markdown links and images, including Multica
+	// mentions such as [@Ada](mention://member/<id>).
+	markdownLink = regexp.MustCompile(`!?\[([^\]]*)\]\([^)\s]+\)`)
 )
 
 type NotificationDeliveryConfig struct {
-	Enabled      bool
-	Delay        time.Duration
+	Enabled bool
+	Delay   time.Duration
+	// Types narrows delivery to these inbox item types; empty delivers all.
 	Types        []string
 	TickInterval time.Duration
 	AppURL       string
@@ -85,23 +92,21 @@ func notificationDeliveryDelay(raw string) time.Duration {
 	return value
 }
 
+// notificationDeliveryTypes parses NOTIFICATION_DELIVERY_TYPES. Empty or "all"
+// returns nil, which delivers every inbox notification.
 func notificationDeliveryTypes(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return append([]string(nil), defaultNotificationDeliveryTypes...)
-	}
 	seen := map[string]bool{}
-	types := make([]string, 0)
+	var types []string
 	for _, item := range strings.Split(raw, ",") {
 		item = strings.TrimSpace(item)
+		if strings.EqualFold(item, "all") {
+			return nil
+		}
 		if item == "" || seen[item] {
 			continue
 		}
 		seen[item] = true
 		types = append(types, item)
-	}
-	if len(types) == 0 {
-		return append([]string(nil), defaultNotificationDeliveryTypes...)
 	}
 	return types
 }
@@ -244,6 +249,7 @@ func (s *NotificationDeliveryService) DeliverAt(ctx context.Context, now time.Ti
 type notificationDeliveryItem struct {
 	Type            string
 	ActorName       string
+	Body            string
 	Details         map[string]string
 	IssueIdentifier string
 	IssueTitle      string
@@ -317,6 +323,7 @@ func groupNotificationDeliveries(
 		batches[index].Items = append(batches[index].Items, notificationDeliveryItem{
 			Type:            row.Type,
 			ActorName:       row.ActorName,
+			Body:            row.Body.String,
 			Details:         details,
 			IssueIdentifier: identifier,
 			IssueTitle:      issueTitle,
@@ -337,62 +344,101 @@ func notificationSettingsURL(appURL, workspaceSlug string) string {
 		url.PathEscape(workspaceSlug) + "/settings"
 }
 
-// notificationAction is the phrase between the actor and the issue label:
-// "<actor> <action> <issue>".
+// notificationAction says who did what, e.g. "Alex assigned you". Google
+// Chat and email both use it, after the issue label.
 func notificationAction(item notificationDeliveryItem) string {
+	actor := item.ActorName
+	if actor == "" {
+		actor = "Someone"
+	}
 	switch item.Type {
-	case "mentioned":
-		return "mentioned you in"
 	case "issue_assigned":
-		return "assigned you"
+		return actor + " assigned you"
 	case "unassigned":
-		return "unassigned you from"
+		return actor + " unassigned you"
 	case "assignee_changed":
-		return "changed the assignee of"
-	case "agent_blocked":
-		return "needs your input on"
+		return actor + " changed the assignee"
+	case "mentioned":
+		return actor + " mentioned you"
 	case "new_comment":
-		return "commented on"
+		return actor + " commented"
 	case "issue_created":
-		return "created"
+		return actor + " created an issue"
 	case "issue_subscribed":
-		return "subscribed you to"
+		return actor + " subscribed you"
 	case "review_requested":
-		return "requested your review on"
+		return actor + " requested your review"
 	case "status_changed", "priority_changed", "start_date_changed", "due_date_changed":
 		field := strings.TrimSuffix(strings.ReplaceAll(item.Type, "_", " "), " changed")
-		from, to := item.Details["from"], item.Details["to"]
-		if from == "" {
-			from = "unset"
-		}
-		if to == "" {
-			to = "unset"
-		}
-		return fmt.Sprintf("changed %s from %s to %s on", field, from, to)
+		from := changeValue(item.Type, item.Details["from"])
+		to := changeValue(item.Type, item.Details["to"])
+		return fmt.Sprintf("%s changed %s: %s → %s", actor, field, from, to)
 	case "reaction_added":
-		if emoji := item.Details["emoji"]; emoji != "" {
-			return "reacted " + emoji + " on"
-		}
-		return "reacted on"
+		return actor + " reacted " + item.Details["emoji"]
 	case "task_failed", "quick_create_failed":
-		return "had a failed run on"
+		return actor + "'s run failed"
 	case "task_completed", "agent_completed", "quick_create_done":
-		return "completed a run on"
+		return actor + " completed the run"
+	case "agent_blocked":
+		return actor + " is blocked"
 	case "app_action_requested", "app_action_reminder":
-		return "needs your approval on"
+		return actor + " needs your approval"
 	case "app_connect_requested":
-		return "needs you to connect an app for"
-	case "app_action_result":
-		return "reported an app action result on"
+		return actor + " needs you to connect an app"
 	case "children_done":
-		return "finished all sub-issues of"
+		return "All sub-issues are done"
+	case "quick_create_unconfirmed":
+		return "Issue creation could not be confirmed"
 	case "autopilot_paused":
-		return "paused autopilot on"
+		return "Autopilot paused"
 	case "autopilot_quota_exceeded":
-		return "hit the autopilot quota on"
+		return "Autopilot quota exceeded"
+	case "app_action_result":
+		return actor + " reported an app action result"
 	default:
-		return "sent you a notification about"
+		return strings.ReplaceAll(item.Type, "_", " ")
 	}
+}
+
+// changeValue labels a changed field's value. Status and priority are stored as
+// keys (in_progress), so they read as titles (In Progress); dates stay as-is.
+func changeValue(kind, value string) string {
+	if value == "" {
+		return "unset"
+	}
+	if kind != "status_changed" && kind != "priority_changed" {
+		return value
+	}
+	words := strings.Fields(strings.ReplaceAll(value, "_", " "))
+	for i, word := range words {
+		first, size := utf8.DecodeRuneInString(word)
+		words[i] = string(unicode.ToUpper(first)) + word[size:]
+	}
+	return strings.Join(words, " ")
+}
+
+// plainText reads a markdown excerpt as text: a mention becomes its "@Name"
+// label and a link its text, since neither channel renders the markup.
+func plainText(value string) string {
+	return markdownLink.ReplaceAllString(value, "$1")
+}
+
+func compactText(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func truncateCompactText(value string) string {
+	value = compactText(value)
+	runes := []rune(value)
+	if len(runes) <= notificationFieldRuneLimit {
+		return value
+	}
+	return string(runes[:notificationFieldRuneLimit-1]) + "…"
+}
+
+// notificationExcerpt is the item's comment or message text, one line.
+func notificationExcerpt(item notificationDeliveryItem) string {
+	return truncateCompactText(plainText(item.Body))
 }
 
 func notificationItemLabel(item notificationDeliveryItem) string {
@@ -404,7 +450,7 @@ func notificationItemLabel(item notificationDeliveryItem) string {
 	case item.IssueTitle != "":
 		return item.IssueTitle
 	default:
-		return "an issue"
+		return "New inbox notification"
 	}
 }
 
@@ -414,19 +460,17 @@ func buildNotificationEmail(batch notificationDeliveryBatch) (string, string) {
 
 	var items strings.Builder
 	for _, item := range batch.Items {
-		safeActor := html.EscapeString(item.ActorName)
-		safeLabel := html.EscapeString(notificationItemLabel(item))
+		safeLabel := html.EscapeString(truncateCompactText(notificationItemLabel(item)))
 		label := "<strong>" + safeLabel + "</strong>"
 		if item.IssueURL != "" {
 			label = `<a href="` + html.EscapeString(item.IssueURL) +
 				`" style="color: inherit;"><strong>` + safeLabel + "</strong></a>"
 		}
-		fmt.Fprintf(&items,
-			`<li style="margin: 0 0 12px;"><strong>%s</strong> %s %s</li>`,
-			safeActor,
-			html.EscapeString(notificationAction(item)),
-			label,
-		)
+		line := label + " — " + html.EscapeString(truncateCompactText(notificationAction(item)))
+		if excerpt := notificationExcerpt(item); excerpt != "" {
+			line += " — " + html.EscapeString(excerpt)
+		}
+		fmt.Fprintf(&items, `<li style="margin: 0 0 12px;">%s</li>`, line)
 	}
 
 	body := fmt.Sprintf(
@@ -452,43 +496,60 @@ func notificationEmailSubject(batch notificationDeliveryBatch) string {
 			sanitizeSubjectField(batch.WorkspaceName),
 		)
 	}
-
 	item := batch.Items[0]
-	actor := sanitizeSubjectField(item.ActorName)
-	label := sanitizeSubjectField(notificationItemLabel(item))
-	switch item.Type {
-	case "mentioned":
-		return fmt.Sprintf("%s mentioned you in %s", actor, label)
-	case "issue_assigned":
-		return fmt.Sprintf("%s assigned you %s", actor, label)
-	case "agent_blocked":
-		return fmt.Sprintf("%s needs your input on %s", actor, label)
-	default:
-		return fmt.Sprintf("%s sent you a notification in %s", actor, sanitizeSubjectField(batch.WorkspaceName))
-	}
+	return sanitizeSubjectField(notificationAction(item)) + " — " +
+		sanitizeSubjectField(notificationItemLabel(item))
 }
 
+// buildGoogleChatNotification renders a batch as one message: the workspace
+// name in bold, then one line per item with the issue link, who did what and
+// the comment excerpt. Lines that would exceed Google Chat's budget are counted
+// in a trailing "and N more" line.
 func buildGoogleChatNotification(batch notificationDeliveryBatch) string {
+	if len(batch.Items) == 0 {
+		return ""
+	}
 	var message strings.Builder
-	fmt.Fprintf(&message, "*%d new notification", len(batch.Items))
 	if len(batch.Items) != 1 {
-		message.WriteString("s")
+		fmt.Fprintf(&message, "*%d new notifications in ", len(batch.Items))
+	} else {
+		message.WriteString("*")
 	}
-	fmt.Fprintf(&message, " in %s*\n", EscapeGoogleChatText(batch.WorkspaceName))
+	fmt.Fprintf(&message, "%s*", EscapeGoogleChatText(truncateCompactText(batch.WorkspaceName)))
 
-	for _, item := range batch.Items {
-		label := EscapeGoogleChatText(notificationItemLabel(item))
-		if item.IssueURL != "" {
-			label = "<" + item.IssueURL + "|" + label + ">"
+	for index, item := range batch.Items {
+		line := googleChatNotificationLine(item)
+		remainingAfter := len(batch.Items) - index - 1
+		candidateRunes := utf8.RuneCountInString(message.String()) + utf8.RuneCountInString(line)
+		if candidateRunes <= googleChatMessageRuneBudget &&
+			(remainingAfter == 0 ||
+				candidateRunes+utf8.RuneCountInString(omittedItemsLine(remainingAfter)) <= googleChatMessageRuneBudget) {
+			message.WriteString(line)
+			continue
 		}
-		fmt.Fprintf(&message, "• *%s* %s %s\n",
-			EscapeGoogleChatText(item.ActorName),
-			EscapeGoogleChatText(notificationAction(item)),
-			label,
-		)
+		message.WriteString(omittedItemsLine(len(batch.Items) - index))
+		break
 	}
-	fmt.Fprintf(&message, "\n<%s|Change notification settings>", batch.SettingsURL)
 	return message.String()
+}
+
+func googleChatNotificationLine(item notificationDeliveryItem) string {
+	label := EscapeGoogleChatText(truncateCompactText(notificationItemLabel(item)))
+	if item.IssueURL != "" {
+		label = "<" + item.IssueURL + "|" + label + ">"
+	}
+	line := "\n• " + label + " — " + EscapeGoogleChatText(truncateCompactText(notificationAction(item)))
+	if excerpt := notificationExcerpt(item); excerpt != "" {
+		line += " — " + EscapeGoogleChatText(excerpt)
+	}
+	return line
+}
+
+func omittedItemsLine(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n…and %d more in Multica", count)
 }
 
 func EscapeGoogleChatText(value string) string {
@@ -499,7 +560,7 @@ func EscapeGoogleChatText(value string) string {
 
 func BuildGoogleChatConfirmation(workspaceName string) string {
 	return fmt.Sprintf(
-		"Multica notifications are connected for *%s*",
+		"Multica notifications are connected for *%s*.",
 		EscapeGoogleChatText(workspaceName),
 	)
 }

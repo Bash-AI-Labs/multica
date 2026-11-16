@@ -881,10 +881,10 @@
     },
     "delivery": {
       "title": "Delivery",
-      "description": "Send important unread notifications outside Multica.",
+      "description": "Send unread inbox notifications outside Multica.",
       "email": {
         "label": "Email notifications",
-        "description": "Mentions, assignments, and agents needing your input, if still unread after 10 minutes"
+        "description": "Inbox notifications still unread after 10 minutes"
       },
       "google_chat": {
         "label": "Google Chat",

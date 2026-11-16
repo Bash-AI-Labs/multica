@@ -68,7 +68,7 @@ func TestNotificationMessageBuildersEscapeAndDescribeItems(t *testing.T) {
 	if strings.ContainsAny(subject, "\r\n") {
 		t.Fatalf("subject contains a line break: %q", subject)
 	}
-	if subject != "Dillon <script> mentioned you in BAS-12: Fix <login> & logout" {
+	if subject != "Dillon <script> mentioned you — BAS-12: Fix <login> & logout" {
 		t.Fatalf("subject = %q", subject)
 	}
 	for _, want := range []string{
@@ -103,25 +103,41 @@ func TestNotificationMessagesDescribeChangesFromDetails(t *testing.T) {
 	statusRow.Details = []byte(`{"from":"todo","to":"in_review"}`)
 	reactionRow := deliveryRow(pgUUID(1), pgUUID(3), "reaction_added", 13)
 	reactionRow.Details = []byte(`{"emoji":"<b>👍</b>"}`)
-	batches := groupNotificationDeliveries([]db.ListPendingNotificationDeliveriesRow{statusRow, reactionRow}, "https://app.example.test")
-	if len(batches) != 1 || len(batches[0].Items) != 2 {
+	mentionRow := deliveryRow(pgUUID(1), pgUUID(3), "mentioned", 14)
+	mentionRow.Body = pgtype.Text{String: "[@Charles](mention://member/de2f3c96) see [the spec](https://example.com/spec)", Valid: true}
+	batches := groupNotificationDeliveries([]db.ListPendingNotificationDeliveriesRow{statusRow, reactionRow, mentionRow}, "https://app.example.test")
+	if len(batches) != 1 || len(batches[0].Items) != 3 {
 		t.Fatalf("batches = %+v", batches)
 	}
 
 	chat := buildGoogleChatNotification(batches[0])
 	_, email := buildNotificationEmail(batches[0])
 	for _, want := range []string{
-		"*Dillon* changed status from todo to in_review on <https://app.example.test/bash/issues/BAS-12|",
-		"*Dillon* reacted &lt;b&gt;👍&lt;/b&gt; on <https://app.example.test/bash/issues/BAS-13|",
+		"*3 new notifications in BashPOS*",
+		"\n• <https://app.example.test/bash/issues/BAS-12|BAS-12: Fix login> — Dillon changed status: Todo → In Review",
+		"\n• <https://app.example.test/bash/issues/BAS-13|BAS-13: Fix login> — Dillon reacted &lt;b&gt;👍&lt;/b&gt;",
+		"\n• <https://app.example.test/bash/issues/BAS-14|BAS-14: Fix login> — Dillon mentioned you — @Charles see the spec",
 	} {
 		if !strings.Contains(chat, want) {
 			t.Fatalf("Google Chat message missing %q:\n%s", want, chat)
 		}
 	}
-	for _, want := range []string{"changed status from todo to in_review on", "reacted &lt;b&gt;👍&lt;/b&gt; on"} {
+	if strings.Contains(chat, "mention://") || strings.Contains(chat, "example.com/spec") {
+		t.Fatalf("Google Chat message kept markdown markup:\n%s", chat)
+	}
+	for _, want := range []string{
+		"Dillon changed status: Todo → In Review",
+		"Dillon reacted &lt;b&gt;👍&lt;/b&gt;",
+		"Dillon mentioned you — @Charles see the spec",
+	} {
 		if !strings.Contains(email, want) {
 			t.Fatalf("email body missing %q:\n%s", want, email)
 		}
+	}
+
+	single := buildGoogleChatNotification(notificationDeliveryBatch{WorkspaceName: "BashPOS", Items: batches[0].Items[:1]})
+	if !strings.HasPrefix(single, "*BashPOS*\n• ") {
+		t.Fatalf("single-item message = %q, want the workspace name as its header", single)
 	}
 }
 
@@ -139,8 +155,8 @@ func TestNotificationDeliveryConfigUsesEmptyDefaultsAndAcceptsZeroDelay(t *testi
 	if config.Delay != 10*time.Minute {
 		t.Fatalf("delay = %s", config.Delay)
 	}
-	if strings.Join(config.Types, ",") != "mentioned,issue_assigned,agent_blocked" {
-		t.Fatalf("types = %#v", config.Types)
+	if len(config.Types) != 0 {
+		t.Fatalf("types = %#v, want none (deliver every type)", config.Types)
 	}
 	if config.AppURL != "https://frontend.example.test" {
 		t.Fatalf("app URL = %q", config.AppURL)
@@ -150,6 +166,15 @@ func TestNotificationDeliveryConfigUsesEmptyDefaultsAndAcceptsZeroDelay(t *testi
 	if zero := NotificationDeliveryConfigFromEnv().Delay; zero != 0 {
 		t.Fatalf("zero delay = %s", zero)
 	}
+
+	t.Setenv("NOTIFICATION_DELIVERY_TYPES", " mentioned, issue_assigned,mentioned ")
+	if got := strings.Join(NotificationDeliveryConfigFromEnv().Types, ","); got != "mentioned,issue_assigned" {
+		t.Fatalf("narrowed types = %q", got)
+	}
+	t.Setenv("NOTIFICATION_DELIVERY_TYPES", "mentioned,all")
+	if got := NotificationDeliveryConfigFromEnv().Types; len(got) != 0 {
+		t.Fatalf("all types = %#v, want none", got)
+	}
 }
 
 func TestNotificationEmailSubjectsByTypeAndBatchSize(t *testing.T) {
@@ -157,9 +182,9 @@ func TestNotificationEmailSubjectsByTypeAndBatchSize(t *testing.T) {
 		kind string
 		want string
 	}{
-		{"mentioned", "Dillon mentioned you in BAS-12: Fix login"},
-		{"issue_assigned", "Dillon assigned you BAS-12: Fix login"},
-		{"agent_blocked", "Dillon needs your input on BAS-12: Fix login"},
+		{"mentioned", "Dillon mentioned you — BAS-12: Fix login"},
+		{"issue_assigned", "Dillon assigned you — BAS-12: Fix login"},
+		{"agent_blocked", "Dillon is blocked — BAS-12: Fix login"},
 	}
 	for _, test := range tests {
 		t.Run(test.kind, func(t *testing.T) {
@@ -292,7 +317,7 @@ func TestNotificationDeliveryWorkerFiltersAndBatches(t *testing.T) {
 		NotificationDeliveryConfig{
 			Enabled:      true,
 			Delay:        10 * time.Minute,
-			Types:        append([]string(nil), defaultNotificationDeliveryTypes...),
+			Types:        []string{"mentioned", "issue_assigned", "agent_blocked"},
 			TickInterval: time.Minute,
 			AppURL:       "https://app.example.test",
 		},
@@ -327,6 +352,19 @@ func TestNotificationDeliveryWorkerFiltersAndBatches(t *testing.T) {
 	}
 	if len(email.calls) != 1 || len(chat.calls) != 2 {
 		t.Fatalf("a later tick redelivered old rows: email=%d chat=%d", len(email.calls), len(chat.calls))
+	}
+
+	// With no type list, every unread inbox notification is delivered,
+	// including the comment the narrowed worker skipped.
+	allEmail := &fakeNotificationEmailSender{configured: true}
+	allWorker := NewNotificationDeliveryService(db.New(pool), allEmail, &fakeNotificationChatSender{},
+		NotificationDeliveryConfig{Enabled: true, Delay: 10 * time.Minute, TickInterval: time.Minute, AppURL: "https://app.example.test"})
+	allWorker.Initialize(base)
+	if err := allWorker.DeliverAt(context.Background(), base.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(allEmail.calls) != 1 || allEmail.calls[0].subject != "3 new notifications in BashPOS" {
+		t.Fatalf("all-types email calls = %#v", allEmail.calls)
 	}
 }
 

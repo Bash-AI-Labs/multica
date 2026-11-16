@@ -872,10 +872,10 @@
     },
     "delivery": {
       "title": "配信",
-      "description": "重要な未読通知を Multica の外にも送信します。",
+      "description": "未読のインボックス通知を Multica の外にも送信します。",
       "email": {
         "label": "メール通知",
-        "description": "メンション、担当の割り当て、入力を必要としているエージェントの通知が 10 分後も未読の場合"
+        "description": "10 分後も未読のインボックス通知"
       },
       "google_chat": {
         "label": "Google Chat",

@@ -12,6 +12,7 @@ SELECT
     w.issue_prefix,
     issue.number AS issue_number,
     issue.title AS issue_title,
+    i.body,
     CASE WHEN i.actor_type = 'system' THEN 'Multica'
          ELSE COALESCE(actor_agent.name, actor_user.name, 'Someone') END::text AS actor_name,
     COALESCE(i.details, '{}'::jsonb) AS details,
@@ -40,7 +41,9 @@ LEFT JOIN notification_preference preference
 WHERE i.recipient_type = 'member'
   AND i.read = false
   AND i.archived = false
-  AND i.type = ANY(sqlc.arg('types')::text[])
+  -- An empty type list delivers every inbox notification.
+  AND (COALESCE(cardinality(sqlc.arg('types')::text[]), 0) = 0
+       OR i.type = ANY(sqlc.arg('types')::text[]))
   AND i.created_at > sqlc.arg('after')
   AND i.created_at <= sqlc.arg('before')
 ORDER BY i.workspace_id, i.recipient_id, i.created_at, i.id;

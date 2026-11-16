@@ -872,10 +872,10 @@
     },
     "delivery": {
       "title": "通知发送",
-      "description": "将重要的未读通知发送到 Multica 之外。",
+      "description": "将未读的收件箱通知发送到 Multica 之外。",
       "email": {
         "label": "邮件通知",
-        "description": "提及、分配及需要你协助的智能体通知，若 10 分钟后仍未读则发送"
+        "description": "10 分钟后仍未读的收件箱通知"
       },
       "google_chat": {
         "label": "Google Chat",

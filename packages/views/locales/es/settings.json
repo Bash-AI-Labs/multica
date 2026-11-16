@@ -881,10 +881,10 @@
     },
     "delivery": {
       "title": "Entrega",
-      "description": "Envía fuera de Multica las notificaciones importantes que sigan sin leer.",
+      "description": "Envía fuera de Multica las notificaciones de la bandeja que sigan sin leer.",
       "email": {
         "label": "Notificaciones por correo",
-        "description": "Menciones, asignaciones y agentes que necesitan tu intervención si siguen sin leer después de 10 minutos"
+        "description": "Notificaciones de la bandeja que sigan sin leer después de 10 minutos"
       },
       "google_chat": {
         "label": "Google Chat",

@@ -25,6 +25,7 @@ SELECT
     w.issue_prefix,
     issue.number AS issue_number,
     issue.title AS issue_title,
+    i.body,
     CASE WHEN i.actor_type = 'system' THEN 'Multica'
          ELSE COALESCE(actor_agent.name, actor_user.name, 'Someone') END::text AS actor_name,
     COALESCE(i.details, '{}'::jsonb) AS details,
@@ -53,7 +54,9 @@ LEFT JOIN notification_preference preference
 WHERE i.recipient_type = 'member'
   AND i.read = false
   AND i.archived = false
-  AND i.type = ANY($1::text[])
+  -- An empty type list delivers every inbox notification.
+  AND (COALESCE(cardinality($1::text[]), 0) = 0
+       OR i.type = ANY($1::text[]))
   AND i.created_at > $2
   AND i.created_at <= $3
 ORDER BY i.workspace_id, i.recipient_id, i.created_at, i.id
@@ -78,6 +81,7 @@ type ListPendingNotificationDeliveriesRow struct {
 	IssuePrefix    string             `json:"issue_prefix"`
 	IssueNumber    pgtype.Int4        `json:"issue_number"`
 	IssueTitle     pgtype.Text        `json:"issue_title"`
+	Body           pgtype.Text        `json:"body"`
 	ActorName      string             `json:"actor_name"`
 	Details        []byte             `json:"details"`
 	Preferences    []byte             `json:"preferences"`
@@ -105,6 +109,7 @@ func (q *Queries) ListPendingNotificationDeliveries(ctx context.Context, arg Lis
 			&i.IssuePrefix,
 			&i.IssueNumber,
 			&i.IssueTitle,
+			&i.Body,
 			&i.ActorName,
 			&i.Details,
 			&i.Preferences,

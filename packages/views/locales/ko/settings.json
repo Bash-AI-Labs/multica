@@ -872,10 +872,10 @@
     },
     "delivery": {
       "title": "전달",
-      "description": "중요한 미확인 알림을 Multica 밖으로도 보냅니다.",
+      "description": "읽지 않은 인박스 알림을 Multica 밖으로도 보냅니다.",
       "email": {
         "label": "이메일 알림",
-        "description": "멘션, 할당, 입력이 필요한 에이전트 알림이 10분 후에도 읽지 않은 상태인 경우"
+        "description": "10분 후에도 읽지 않은 인박스 알림"
       },
       "google_chat": {
         "label": "Google Chat",

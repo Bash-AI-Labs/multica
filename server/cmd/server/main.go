@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -741,7 +742,7 @@ func main() {
 	slog.Info("notification delivery configured",
 		"enabled", notificationDeliveryConfig.Enabled,
 		"channels", strings.Join(notificationDeliveryChannels, ","),
-		"types", strings.Join(notificationDeliveryConfig.Types, ","),
+		"types", cmp.Or(strings.Join(notificationDeliveryConfig.Types, ","), "all"),
 		"delay", notificationDeliveryConfig.Delay.String(),
 	)
 	notificationDelivery := service.NewNotificationDeliveryService(

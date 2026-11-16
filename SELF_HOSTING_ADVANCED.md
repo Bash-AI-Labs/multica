@@ -61,13 +61,13 @@ STARTTLS is used automatically when advertised by the server. Port 465 (SMTPS / 
 
 Members can enable email delivery and connect a Google Chat incoming webhook from **Settings → Notifications → Delivery**. Delivery uses the existing per-workspace notification preferences, so each member configures each workspace independently. Email delivery requires either Resend or SMTP; Google Chat is configured with the member's incoming-webhook URL.
 
-The backend checks once per minute and sends one email and/or one Google Chat message per workspace and recipient. It only includes configured delivery types that are still unread and not archived after the delay. Items muted by their inbox notification group never create an inbox row and therefore are never delivered.
+The backend checks once per minute and sends one email and/or one Google Chat message per workspace and recipient. It only includes items that are still unread and not archived after the delay, narrowed to `NOTIFICATION_DELIVERY_TYPES` when set. Each item shows the issue link, who did what (for example "Alex changed status: Todo → In Progress") and the comment text, with mentions shown as `@Name`. Items muted by their inbox notification group never create an inbox row and therefore are never delivered.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NOTIFICATION_DELIVERY_ENABLED` | Set to `false` to disable the delivery worker entirely. Empty uses the default. | `true` |
 | `NOTIFICATION_DELIVERY_DELAY` | Go duration to wait before delivery. This avoids a second ping when someone reads or archives the item in Multica. `0` makes new items eligible on the next one-minute tick. Empty uses the default. | `10m` |
-| `NOTIFICATION_DELIVERY_TYPES` | Comma-separated inbox item types eligible for out-of-app delivery. Empty uses the default. | `mentioned,issue_assigned,agent_blocked` |
+| `NOTIFICATION_DELIVERY_TYPES` | Comma-separated inbox item types to deliver, for example `mentioned,issue_assigned,agent_blocked`. Empty or `all` delivers every inbox notification. | every type |
 
 The startup watermark is `now - delay`, so a deployment or restart never sends an old backlog. The worker is intentionally single-instance and keeps its watermark in memory; a restart may skip items created during the downtime window. Run one backend instance for this delivery mode.
 

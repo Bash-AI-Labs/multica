@@ -101,7 +101,7 @@ describe("NotificationsTab delivery settings", () => {
     expect(await screen.findByText("Delivery")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Mentions, assignments, and agents needing your input, if still unread after 10 minutes",
+        "Inbox notifications still unread after 10 minutes",
       ),
     ).toBeInTheDocument();
 
