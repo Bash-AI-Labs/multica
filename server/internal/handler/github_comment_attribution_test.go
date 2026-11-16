@@ -134,6 +134,11 @@ func TestWebhook_PRComment_SkipsAgentsOwnComment(t *testing.T) {
 		t.Fatalf("author's reply reached the reviewer %d times, want 1", n)
 	}
 
+	sendComment("vercel[bot]", "Deployment ready.")
+	if n := mirrored(authorIssue, "Deployment ready."); n != 0 {
+		t.Fatalf("a Vercel deployment comment reached the author %d times, want 0", n)
+	}
+
 	sendComment("teammate", "Please also cover the empty case.")
 	if n := mirrored(authorIssue, "Please also cover the empty case."); n != 1 {
 		t.Fatalf("a teammate's comment reached the author %d times, want 1", n)

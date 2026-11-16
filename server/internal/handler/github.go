@@ -2300,11 +2300,11 @@ func (h *Handler) triggerAgentForPRComment(ctx context.Context, installationID i
 }
 
 // isIgnoredWebhookBot returns true for bot logins whose PR review comments
-// should NOT trigger agent tasks. We only ignore github-actions and our own
-// app bot — other bots (e.g. Copilot) should still trigger agents.
+// should NOT trigger agent tasks: github-actions, Vercel's deployment status
+// comments, and our own app bot. Other bots (e.g. Copilot) still trigger agents.
 func isIgnoredWebhookBot(login string) bool {
 	switch login {
-	case "github-actions", "github-actions[bot]":
+	case "github-actions", "github-actions[bot]", "vercel[bot]":
 		return true
 	}
 	// Ignore our own GitHub App bot (e.g. "multica-bashpos[bot]")
