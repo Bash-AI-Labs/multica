@@ -40,6 +40,15 @@ const blobUrlCache = new Map<string, string>();
 const blobUrlRefCount = new Map<string, number>();
 const blobUrlGCTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Native media loads (<img>, a PDF <iframe>) can only authenticate with the
+// session cookie, which only web in cookie mode has. Desktop and mobile (API
+// base URL set) and web sessions still on a pre-cookie localStorage token send
+// a bearer token that a native load cannot carry, so their media must be
+// fetched through the API client instead.
+function nativeLoadsCarrySession(): boolean {
+  return (api.getBaseUrl?.() ?? "") === "" && !api.getToken?.();
+}
+
 export function __resetInlineMediaBlobCacheForTests(): void {
   for (const t of blobUrlGCTimers.values()) clearTimeout(t);
   blobUrlGCTimers.clear();
@@ -59,8 +68,8 @@ export function __resetInlineMediaBlobCacheForTests(): void {
 // mobile webview, and split-origin web deployments cannot rely on that: no
 // cookie is attached and the Bearer token cannot be put on a native resource
 // fetch, so the image 401s. Desktop/mobile expose a non-empty
-// `api.getBaseUrl()`; web can also hit this path when the server emits an
-// absolute markdown URL whose origin differs from the current page.
+// `api.getBaseUrl()`; web hits this path in legacy token mode, or when the
+// server emits an absolute markdown URL whose origin differs from the page.
 //
 // For them, fetch fresh attachment metadata through the authenticated API —
 // the same re-sign the click-time download path already does — and swap in
@@ -102,7 +111,7 @@ export function useResignedInlineMedia(
     !!resignAttachmentId &&
     !!pickedUrl &&
     idFromPickedUrl !== undefined &&
-    ((api.getBaseUrl?.() ?? "") !== "" || isCrossOriginWebURL);
+    (!nativeLoadsCarrySession() || isCrossOriginWebURL);
 
   const { data: fresh, isError: freshFailed } = useQuery({
     queryKey: ["attachment-inline-resign", resignAttachmentId],
@@ -199,7 +208,8 @@ export function useFreshStreamedMediaURL(
   const expiresAt = capabilityExpiresAt(dl);
   // The authenticated route redirects to forced downloads for presign/CDN
   // storage. Use it for PDFs only after metadata confirms inline proxying.
-  const sameOriginPDF = active && pdf && expiresAt !== undefined && isSameOriginHTTPURL(stablePDFURL);
+  const sameOriginPDF =
+    active && pdf && expiresAt !== undefined && nativeLoadsCarrySession() && isSameOriginHTTPURL(stablePDFURL);
   const proxyPDF = active && pdf && !sameOriginPDF && expiresAt !== undefined;
   const pdfBytes = useQuery({
     queryKey: ["attachment-preview-pdf", id],

@@ -3,12 +3,17 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "@multica/core/api/client";
 import type { ReactNode } from "react";
-import { useFreshStreamedMediaURL } from "./use-inline-media-url";
+import {
+  __resetInlineMediaBlobCacheForTests,
+  useFreshStreamedMediaURL,
+  useResignedInlineMedia,
+} from "./use-inline-media-url";
 
-const { getAttachment, getAttachmentBlob, getBaseUrl } = vi.hoisted(() => ({
+const { getAttachment, getAttachmentBlob, getBaseUrl, getToken } = vi.hoisted(() => ({
   getAttachment: vi.fn(), getAttachmentBlob: vi.fn(), getBaseUrl: vi.fn(() => "https://api.example.test"),
+  getToken: vi.fn((): string | null => null),
 }));
-vi.mock("@multica/core/api", () => ({ api: { getAttachment, getAttachmentBlob, getBaseUrl } }));
+vi.mock("@multica/core/api", () => ({ api: { getAttachment, getAttachmentBlob, getBaseUrl, getToken } }));
 const id = "11111111-2222-3333-4444-555555555555";
 const stable = `/api/attachments/${id}/download`;
 const capability = (exp: number, sig = "fresh") => `/api/attachments/${id}/signed-download?exp=${exp}&sig=${sig}`;
@@ -22,6 +27,44 @@ afterEach(() => {
   cleanup(); vi.useRealTimers(); vi.clearAllMocks(); vi.unstubAllGlobals();
   focusManager.setFocused(undefined);
   getBaseUrl.mockReturnValue("https://api.example.test");
+  getToken.mockReturnValue(null);
+  __resetInlineMediaBlobCacheForTests();
+});
+
+// A web session that logged in before cookie auth keeps a localStorage token:
+// its API calls work, but a native <img> request carries no credential.
+describe("web sessions in legacy token mode", () => {
+  it("loads an inline image through the API client", async () => {
+    getBaseUrl.mockReturnValue("");
+    getToken.mockReturnValue("legacy-token");
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:image"); static revokeObjectURL = vi.fn(); });
+    getAttachment.mockResolvedValue({ download_url: stable });
+    getAttachmentBlob.mockResolvedValue(new Blob(["png"], { type: "image/png" }));
+    const { wrapper } = setup();
+    const hook = renderHook(() => useResignedInlineMedia(id, stable, true), { wrapper });
+    await waitFor(() => expect(hook.result.current.url).toBe("blob:image"));
+    expect(getAttachmentBlob).toHaveBeenCalledWith(id);
+  });
+
+  it("keeps a cookie-mode web image on its native URL", () => {
+    getBaseUrl.mockReturnValue("");
+    const { wrapper } = setup();
+    const hook = renderHook(() => useResignedInlineMedia(id, stable, true), { wrapper });
+    expect(hook.result.current).toEqual({ url: stable, pending: false });
+    expect(getAttachment).not.toHaveBeenCalled();
+  });
+
+  it("fetches a PDF through the API client instead of the cookie-only URL", async () => {
+    getBaseUrl.mockReturnValue("");
+    getToken.mockReturnValue("legacy-token");
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:pdf"); static revokeObjectURL = vi.fn(); });
+    getAttachment.mockResolvedValue({ download_url: capability(Math.floor(Date.now() / 1000) + 60) });
+    getAttachmentBlob.mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
+    const { wrapper } = setup();
+    const hook = renderHook(() => useFreshStreamedMediaURL(id, stable, true, true), { wrapper });
+    await waitFor(() => expect(hook.result.current.url).toBe("blob:pdf"));
+    expect(getAttachmentBlob).toHaveBeenCalled();
+  });
 });
 
 describe("short-lived streamed attachment capabilities", () => {
