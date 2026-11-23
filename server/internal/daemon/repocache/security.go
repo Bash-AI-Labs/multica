@@ -180,6 +180,9 @@ func workspaceCacheDir(root, workspaceID string) (string, error) {
 	return joinUnder(root, workspaceID)
 }
 
+// repositoryCachePath is where a repository's bare cache lives: an existing
+// cache under its legacy name, which running worktrees still point into,
+// otherwise the bounded name.
 func repositoryCachePath(root, workspaceID, repoURL string) (string, error) {
 	if err := validateRepositoryURL(repoURL); err != nil {
 		return "", err
@@ -187,6 +190,11 @@ func repositoryCachePath(root, workspaceID, repoURL string) (string, error) {
 	wsDir, err := workspaceCacheDir(root, workspaceID)
 	if err != nil {
 		return "", err
+	}
+	if legacy := legacyBareDirName(repoURL); validatePathComponent(legacy, "repository cache name") == nil {
+		if path, err := joinUnder(wsDir, legacy); err == nil && isBareRepo(path) {
+			return path, nil
+		}
 	}
 	name := bareDirName(repoURL)
 	if err := validatePathComponent(name, "repository cache name"); err != nil {

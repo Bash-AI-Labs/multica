@@ -9,17 +9,11 @@ import { notFound } from "next/navigation";
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { Metadata } from "next";
 import { docsAlternates } from "@/lib/site";
-import { i18n, type Lang } from "@/lib/i18n";
+import { asLang } from "@/lib/i18n";
 import { DocsLocaleProvider, LocaleLink } from "@/components/locale-link";
 import { VideoEmbed } from "@/components/video-embed";
 import { docsSlugStaticParams } from "@/lib/static-params";
 import { DocsImage } from "@/components/docs-image";
-
-function asLang(lang: string): Lang {
-  return (i18n.languages as readonly string[]).includes(lang)
-    ? (lang as Lang)
-    : (i18n.defaultLanguage as Lang);
-}
 
 export default async function Page(props: {
   params: Promise<{ lang: string; slug: string[] }>;

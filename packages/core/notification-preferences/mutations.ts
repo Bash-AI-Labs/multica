@@ -7,6 +7,7 @@ import { useCallback, useRef } from "react";
 import { api } from "../api";
 import { useWorkspaceId } from "../hooks";
 import { useRequiredWorkspaceSlug } from "../paths";
+import { issueKeys } from "../issues/queries";
 import { notificationPreferenceKeys } from "./queries";
 import type {
   NotificationPreferences,
@@ -64,6 +65,27 @@ function mapMutationOptions(
           options.onSettled?.(data, error, preferences, result, context)
       : undefined,
   };
+}
+
+/**
+ * Answer the one-time auto-archive question. The server applies the answer to
+ * every workspace where it is still pending, so every workspace's cached
+ * preferences are refetched.
+ */
+export function useResolveAutoArchivePrompt() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+
+  return useMutation<NotificationPreferenceResponse, Error, NotificationPreferences>({
+    mutationFn: (preferences) => api.resolveAutoArchivePrompt(preferences),
+    onSuccess: (data) => {
+      qc.setQueryData(notificationPreferenceKeys.all(wsId), data);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: notificationPreferenceKeys.root() });
+      qc.invalidateQueries({ queryKey: issueKeys.subscribersAll() });
+    },
+  });
 }
 
 export function useUpdateNotificationPreferences() {
@@ -128,6 +150,9 @@ export function useUpdateNotificationPreferences() {
       // only after every queued optimistic patch for this workspace finishes.
       if (qc.isMutating({ mutationKey }) > 1) return;
       qc.invalidateQueries({ queryKey: context?.key ?? mutationKey });
+      // Subscriber lists carry the server's delivery tier, which depends on
+      // these preferences (MUL-9360).
+      qc.invalidateQueries({ queryKey: issueKeys.subscribersAll() });
     },
   });
 

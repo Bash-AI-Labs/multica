@@ -12,6 +12,7 @@ import type {
   NotificationPreferenceResponse,
   NotificationPreferences,
 } from "../types";
+import { issueKeys } from "../issues/queries";
 import { useUpdateNotificationPreferences } from "./mutations";
 import { notificationPreferenceKeys } from "./queries";
 
@@ -132,7 +133,7 @@ describe("useUpdateNotificationPreferences", () => {
     queryClient.setQueryData(notificationPreferenceKeys.all(WORKSPACE_ID), {
       workspace_id: WORKSPACE_ID,
       preferences: {
-        status_changes: "muted",
+        assignments: "muted",
         comments: "muted",
       },
     });
@@ -147,7 +148,7 @@ describe("useUpdateNotificationPreferences", () => {
 
     await waitFor(() => {
       expect(updateNotificationPreferences).toHaveBeenCalledWith(
-        { status_changes: "all" },
+        { assignments: "all" },
         WORKSPACE_SLUG,
       );
     });
@@ -199,14 +200,14 @@ describe("useUpdateNotificationPreferences", () => {
     );
 
     act(() => {
-      result.current.mutate({ status_changes: "muted" });
+      result.current.mutate({ assignments: "muted" });
     });
     await waitFor(() => {
       expect(
         queryClient.getQueryData<NotificationPreferenceResponse>(
           notificationPreferenceKeys.all(WORKSPACE_ID),
         )?.preferences,
-      ).toEqual({ status_changes: "muted" });
+      ).toEqual({ assignments: "muted" });
     });
 
     rerender();
@@ -227,13 +228,13 @@ describe("useUpdateNotificationPreferences", () => {
     rerender();
     first.resolve({
       workspace_id: WORKSPACE_ID,
-      preferences: { status_changes: "muted" },
+      preferences: { assignments: "muted" },
     });
     await waitFor(() => {
       expect(updateNotificationPreferences).toHaveBeenCalledTimes(2);
     });
     expect(updateNotificationPreferences.mock.calls[1]).toEqual([
-      { status_changes: "all" },
+      { assignments: "all" },
       WORKSPACE_SLUG,
     ]);
 
@@ -291,7 +292,13 @@ describe("useUpdateNotificationPreferences", () => {
       preferences: { comments: "muted", updates: "muted" },
     });
     await waitFor(() => {
-      expect(invalidateQueries).toHaveBeenCalledTimes(1);
+      expect(invalidateQueries).toHaveBeenCalledTimes(2);
     });
+    // Subscriber lists carry the server's delivery tier, which reads
+    // others_issues, so they refetch with the preferences.
+    expect(invalidateQueries.mock.calls.map(([filters]) => filters?.queryKey)).toEqual([
+      notificationPreferenceKeys.all(WORKSPACE_ID),
+      issueKeys.subscribersAll(),
+    ]);
   });
 });

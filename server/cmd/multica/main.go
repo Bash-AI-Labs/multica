@@ -49,6 +49,7 @@ func init() {
 
 	// Core commands
 	issueCmd.GroupID = groupCore
+	inboxCmd.GroupID = groupCore
 	issueStatusCatalogCmd.GroupID = groupCore
 	projectCmd.GroupID = groupCore
 	workflowCmd.GroupID = groupCore
@@ -78,6 +79,8 @@ func init() {
 	versionCmd.GroupID = groupAdditional
 
 	rootCmd.AddCommand(issueCmd)
+	rootCmd.AddCommand(inboxCmd)
+	rootCmd.AddCommand(docCmd)
 	rootCmd.AddCommand(issueStatusCatalogCmd)
 	rootCmd.AddCommand(projectCmd)
 	rootCmd.AddCommand(workflowCmd)
@@ -117,6 +120,10 @@ func main() {
 	}
 	if len(os.Args) == 2 && os.Args[1] == agent.CursorHookHelperArg {
 		agent.RunCursorHookRelay(os.Stdin, os.Stdout, os.Getenv)
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == agent.AntigravityHookHelperArg {
+		agent.RunAntigravityHookRelay(os.Stdin, os.Stdout, os.Getenv)
 		return
 	}
 	cli.CleanupStaleUpdateArtifacts()

@@ -11,6 +11,7 @@ const NOTIFICATION_GROUPS = [
   "status_changes",
   "comments",
   "mentions",
+  "reactions",
   "updates",
   "new_issues",
   "agent_activity",
@@ -183,6 +184,31 @@ export function useSettingsSearchIndex(
       })),
       {
         tab: "notifications",
+        anchor: "others_issues",
+        title: t(($) => $.notifications.others_issues.label),
+        description: t(($) => $.notifications.others_issues.description),
+      },
+      {
+        tab: "notifications",
+        anchor: "auto_archive_completed",
+        title: t(($) => $.notifications.leaving.auto_label),
+        description: t(($) => $.notifications.leaving.auto_description),
+      },
+      // Lands on the row above: this one is hidden while auto-archive is off.
+      {
+        tab: "notifications",
+        anchor: "auto_archive_completed",
+        title: t(($) => $.notifications.leaving.after_label),
+        description: t(($) => $.notifications.leaving.after_description),
+      },
+      {
+        tab: "notifications",
+        anchor: "archived",
+        title: t(($) => $.notifications.leaving.archived_label),
+        description: t(($) => $.notifications.leaving.archived_description),
+      },
+      {
+        tab: "notifications",
         anchor: "chat_replies",
         title: t(($) => $.notifications.groups.chat_replies.label),
       },
@@ -272,11 +298,6 @@ export function useSettingsSearchIndex(
         title: t(($) => $.voice_input.history.title),
         description: t(($) => $.voice_input.history.description),
       },
-      {
-        tab: "apps",
-        title: t(($) => $.page.tabs.apps),
-        description: t(($) => $.connected_apps.description),
-      },
       // Workspace
       { tab: "workspace", anchor: "name", title: t(($) => $.workspace.name_label) },
       { tab: "workspace", anchor: "description", title: t(($) => $.workspace.description_label) },
@@ -291,6 +312,11 @@ export function useSettingsSearchIndex(
         tab: "workspace",
         anchor: "issue-prefix",
         title: t(($) => $.workspace.issue_prefix_label),
+      },
+      {
+        tab: "workspace",
+        anchor: "private-projects",
+        title: t(($) => $.private_projects.title),
       },
       { tab: "workspace", anchor: "leave", title: t(($) => $.workspace.leave_title) },
       { tab: "workspace", anchor: "delete", title: t(($) => $.workspace.delete_title) },
