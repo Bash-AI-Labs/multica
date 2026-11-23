@@ -1,21 +1,32 @@
 # Vercel Preview Review
 
-Review an agent's UI change on its Vercel preview. When you stop commenting,
-the review goes to the agent on its own.
+Anyone on your Vercel team can review an agent's UI change on its Vercel
+preview. When they stop commenting, the review goes to the agent that owns the
+issue on its own.
 
-1. Open the pull request's preview deployment and leave comments with the
-   [Vercel Toolbar](https://vercel.com/docs/vercel-toolbar/comments). Each
-   comment records the page, the element you clicked, the React component tree,
-   the viewport and a screenshot.
-2. Two minutes after your last comment on that preview, the service posts every
+1. A teammate opens the pull request's preview deployment and leaves comments
+   with the [Vercel Toolbar](https://vercel.com/docs/vercel-toolbar/comments).
+   Each comment records the page, the element, the React component tree, the
+   viewport and a screenshot.
+2. Two minutes after the last comment on that preview, the service posts every
    new open comment to the issues linked to the pull request, as one comment
-   that wakes the issue's agent.
-3. The agent fixes each item and closes its thread with
-   `vercel comments resolve <thread> --message "<what changed>"`. That needs
-   Vercel CLI 66 or newer, signed in, on the daemon machine.
+   that wakes the issue's agent. Each item names the teammate who wrote it.
+3. The agent makes the changes in the pull request and posts its updates on
+   the Multica issue. It never replies on Vercel. Once an item is done and
+   pushed, it resolves the thread, using the command listed under the item.
+   That needs Vercel CLI 66 or newer, signed in to the team, on the daemon
+   machine.
 
-Replies and new comments after that start a new batch. To send without waiting,
-pick **Send preview review to agent** from the issue actions menu.
+Reviewers keep the conversation on Vercel:
+
+- A reply to an open thread goes back to the agent as a follow-up, showing the
+  original comment and only the new replies.
+- Reopening a resolved thread sends it back marked as reopened, so the agent
+  knows the earlier change did not settle it.
+- New comments start a new review.
+
+To send without waiting, pick **Send preview review to agent** from the issue
+actions menu.
 
 ## What runs where
 
@@ -31,19 +42,26 @@ request from that branch of the project's repository. Branch names like `main`
 repeat across projects, so the repository has to match too. Previews deployed
 from the CLI report the branch `HEAD` and are not matched.
 
-Each review comment ends with a hidden list of the Vercel messages it carried,
-so a message is never sent to the same issue twice, across restarts and
-between the automatic path and the issue action.
+The plugin's workspace storage records, per Vercel thread, which messages each
+issue received. A message is never sent to the same issue twice, across
+restarts and between the automatic path and the issue action. The record of a
+resolved thread is kept for 30 days so a reopen is recognised.
 
-The comment is written as the member who installed the plugin and marked with
-the plugin, and the agent run it starts is attributed to that member. The
-issue action writes as whoever picked it.
+The automatic review is written by the plugin itself, and the agent is told it
+relays reviewers from Vercel. The run it starts uses the permissions of the
+member who installed the plugin and is attributed to them as **Plugin
+installer**. The issue action writes as whoever picked it. Reviewer text cannot
+mention or wake anyone in Multica: mention links in it are turned into plain
+text.
 
-Multica only calls hooks over HTTPS. On first start the container issues a
-self-signed certificate for `preview-review.internal` into a shared volume, and
-the backend trusts exactly that file through `MULTICA_PLUGIN_DEV_CA`.
+Multica only calls hooks over HTTPS. A one-off `preview-review-cert` container
+issues a self-signed certificate for `preview-review.internal` into a shared
+volume before the backend starts, and the backend trusts exactly that file
+through `MULTICA_PLUGIN_DEV_CA`. The backend waits only for that certificate,
+so the service being down never holds the backend back.
 `MULTICA_PLUGIN_DEV_ORIGINS` names the one private origin the backend may dial;
-the consented `net:` scope still applies.
+the consented `net:` scope still applies. The overlay also turns on plugins
+(`FF_PLUGINS_V1`).
 
 ## Setup
 
@@ -98,12 +116,18 @@ failure. The issue action shows the hook's HTTP status:
 A `403 installer_membership_revoked` in the log means the member who installed
 the plugin has left the workspace; reinstall it.
 
+## Tests
+
+```bash
+node --test examples/plugins/vercel-preview-review/server/
+```
+
 ## Scopes
 
 | Scope | Why |
 | --- | --- |
 | `issues:read` | Find the issues linked to a preview's pull request |
-| `comments:read` | See which Vercel messages an issue already received |
 | `comments:write` | Post the review |
 | `tasks:write` | Let that comment wake agents (`trigger_agents`) |
+| `storage:workspace` | Record which Vercel messages each issue received |
 | `net:preview-review.internal` | The only host the issue action may call |

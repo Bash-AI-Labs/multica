@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 /**
- * Vercel Preview Review — sends Vercel Toolbar comments to the issue's agent.
+ * Vercel Preview Review — turns Vercel Toolbar comments into work for the agent
+ * that owns the issue.
  *
- * Two ways in, one way out:
- *   - A poller (needs MULTICA_PLUGIN_TOKEN) watches the team's open toolbar
- *     threads. Once a preview branch has had no new comment for the quiet
- *     window, the new comments go to every issue linked to that branch's open
- *     pull request.
- *   - The "Send preview review to agent" issue action sends right away.
- * Either way the review is one comment that wakes the issue's agent. A hidden
- * marker in it lists the Vercel messages it carried, so nothing is sent twice.
+ * Teammates review a pull request's Vercel preview and comment on it with the
+ * Vercel Toolbar. Once a preview branch has had no new comment for the quiet
+ * window, the poller posts the new comments to every issue linked to that
+ * branch's open pull request, as one comment that wakes the issue's agent. The
+ * "Send preview review to agent" issue action sends right away.
+ *
+ * The agent keeps its updates on the issue and never replies on Vercel: once an
+ * item is done it only resolves the thread. A thread therefore carries nothing
+ * but reviewers' words, and a reviewer who replies to it or reopens it sends it
+ * back to the agent.
+ *
+ * What each issue has received is recorded per thread in the Plugin's workspace
+ * storage, so nothing is sent twice: not across restarts, and not between the
+ * poller and the issue action.
  *
  * Run (see ../README.md for the Docker overlay):
  *   VERCEL_TOKEN=... VERCEL_TEAM_ID=team_... MULTICA_API_URL=http://backend:8080 \
@@ -19,6 +26,7 @@
 import { createServer } from "node:https";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { classify, record, renderReview } from "./review.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 8787);
@@ -32,9 +40,9 @@ const QUIET_MS = Number(env.QUIET_SECONDS ?? 120) * 1000;
 const TLS_DIR = env.TLS_DIR ?? "/tls";
 const HOOK_KEY = "send_preview_review";
 const TOLERANCE_SECONDS = 5 * 60;
-// Multica rejects comments over 64 KiB; leave room for the header.
-const MAX_COMMENT_CHARS = 60_000;
-const MARKER = /<!-- vercel-preview-review messages: ([^>]*?) -->/g;
+// A resolved thread's record is kept this long, so reopening it is recognised.
+const CLOSED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const LEDGER_PREFIX = "thread-";
 
 for (const [name, value] of Object.entries({ VERCEL_TOKEN, VERCEL_TEAM_ID })) {
   if (!value) {
@@ -44,6 +52,13 @@ for (const [name, value] of Object.entries({ VERCEL_TOKEN, VERCEL_TEAM_ID })) {
 }
 
 class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+class UpstreamError extends Error {
   constructor(status, message) {
     super(message);
     this.status = status;
@@ -103,11 +118,35 @@ async function multica(auth, method, path, payload) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
-  if (!response.ok) throw new Error(`Multica ${method} ${path} answered ${response.status}: ${await response.text()}`);
-  return response.json();
+  if (!response.ok) {
+    throw new UpstreamError(response.status, `Multica ${method} ${path} answered ${response.status}: ${await response.text()}`);
+  }
+  return response.status === 204 ? null : response.json();
 }
 
 const isActive = (pr) => pr.branch && (pr.state === "open" || pr.state === "draft");
+
+// --- What each issue has received ---
+//
+// One storage value per Vercel thread: { sent: { issueId: [messageId] },
+// closedAt?, reopened? }. closedAt is set once the thread leaves the open list;
+// seeing it open again means a reviewer reopened it.
+
+const ledgerPath = (threadId) => `/storage/workspace/${LEDGER_PREFIX}${encodeURIComponent(threadId)}`;
+
+async function readLedger(auth, threadId) {
+  try {
+    const { value } = await multica(auth, "GET", ledgerPath(threadId));
+    const ledger = JSON.parse(value);
+    return { ...ledger, sent: ledger.sent ?? {} };
+  } catch (error) {
+    if (error instanceof UpstreamError && error.status === 404) return { sent: {} };
+    throw error;
+  }
+}
+
+const writeLedger = (auth, threadId, ledger) =>
+  multica(auth, "PUT", ledgerPath(threadId), { value: JSON.stringify(ledger) });
 
 // --- Vercel ---
 
@@ -152,77 +191,6 @@ const sameRepo = (repo, pr) =>
 const messageIds = (thread) => (thread.messages ?? []).map((message) => message.id);
 const lastActivity = (thread) => Math.max(0, ...(thread.messages ?? []).map((message) => message.timestamp ?? 0));
 
-// --- Comment ---
-
-const oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
-
-// The React tree Vercel captures runs root -> selected element; the last few
-// lines are the components that actually render the commented element.
-function componentPath(tree) {
-  const lines = tree.split("\n").filter((line) => line.trim());
-  const selected = lines.find((line) => line.startsWith("Selected:"));
-  const tail = lines.slice(-6);
-  const indent = Math.min(...tail.map((line) => line.match(/^ */)[0].length));
-  return [selected, ...tail.map((line) => line.slice(indent))].filter(Boolean).map((line) => line.slice(0, 200));
-}
-
-function images(message) {
-  return (message?.attachments ?? [])
-    .filter((attachment) => attachment.mimeType?.startsWith("image/"))
-    .map((attachment) => `![${attachment.filename ?? "screenshot"}](${attachment.url})`);
-}
-
-function renderThread({ thread }, index) {
-  const [first, ...replies] = thread.messages ?? [];
-  const context = thread.context ?? {};
-  const device = context.device ?? {};
-  const page = context.href ? `[${context.path ?? context.href}](${context.href})` : (context.path ?? "unknown page");
-  const viewport = device.screenWidth
-    ? ` · ${device.screenWidth}×${device.screenHeight} @${device.devicePixelRatio ?? 1}x`
-    : "";
-  const lines = [`### ${index + 1}. ${oneLine(first?.text) || "(screenshot only)"}`, "", `- **Page:** ${page}${viewport}`];
-  if (context.selector) lines.push(`- **Element:** \`${context.selector}\``);
-  lines.push(`- **Vercel thread:** [\`${thread.id}\`](${thread.webUrl})`);
-  const shots = images(first);
-  if (shots.length) lines.push("", ...shots);
-  if (context.frameworkContext) lines.push("", "```text", ...componentPath(context.frameworkContext), "```");
-  for (const reply of replies) {
-    const author = reply.author?.name ?? reply.author?.username ?? "reply";
-    lines.push("", `> **${author}:** ${oneLine(reply.text)}`, ...images(reply).map((image) => `> ${image}`));
-  }
-  return lines.join("\n");
-}
-
-// Returns the comment and how many threads did not fit.
-function renderReview(items) {
-  const prs = [...new Map(items.map(({ pr }) => [pr.id, pr])).values()];
-  const authors = [
-    ...new Set(items.flatMap(({ thread }) => (thread.messages ?? []).map((m) => m.author?.name ?? m.author?.username))),
-  ].filter(Boolean);
-  const header = [
-    `Preview review: ${items.length} open comment${items.length === 1 ? "" : "s"} on ` +
-      prs.map((pr) => `[${pr.repo_name}#${pr.number}](${pr.html_url}) (\`${pr.branch}\`)`).join(", ") +
-      (authors.length ? ` from ${authors.join(", ")}` : ""),
-    "",
-    "Fix each item in that pull request, then close its Vercel thread with " +
-      '`vercel comments resolve <thread> --message "<what changed>"`.',
-  ].join("\n");
-
-  let content = header;
-  const sent = [];
-  for (const [index, item] of items.entries()) {
-    const section = `\n\n---\n\n${renderThread(item, index)}`;
-    if (content.length + section.length > MAX_COMMENT_CHARS) {
-      content += `\n\n---\n\n…and ${items.length - index} more open comments on Vercel, sent next.`;
-      break;
-    }
-    content += section;
-    sent.push(item);
-  }
-  content += `\n\n<!-- vercel-preview-review messages: ${sent.flatMap(({ thread }) => messageIds(thread)).join(" ")} -->`;
-  return { content, sent, remaining: items.length - sent.length };
-}
-
 // Sends are serialized so the poller and the issue action cannot both post
 // the same messages to one issue.
 let sending = Promise.resolve();
@@ -232,19 +200,30 @@ function exclusive(task) {
   return run;
 }
 
-// Posts the threads the issue has not been sent yet; null when there are none.
-function sendReview(auth, issueId, items) {
+// Posts the threads with messages the issue has not received; null when there
+// are none.
+function sendReview(auth, issueId, candidates) {
   return exclusive(async () => {
-    const issuePath = `/issues/${encodeURIComponent(issueId)}`;
-    const { comments = [] } = await multica(auth, "GET", `${issuePath}/comments`);
-    const sent = new Set(comments.flatMap((comment) => [...comment.content.matchAll(MARKER)].flatMap((m) => m[1].split(" "))));
-    const fresh = items
-      .filter(({ thread }) => messageIds(thread).some((id) => !sent.has(id)))
-      .sort((a, b) => (a.thread.messages?.[0]?.timestamp ?? 0) - (b.thread.messages?.[0]?.timestamp ?? 0));
-    if (!fresh.length) return null;
+    const items = [];
+    for (const { pr, thread } of candidates) {
+      const ledger = await readLedger(auth, thread.id);
+      const plan = classify(thread, ledger, issueId);
+      if (plan) items.push({ pr, thread, ledger, ...plan });
+    }
+    if (!items.length) return null;
 
-    const review = renderReview(fresh);
-    const comment = await multica(auth, "POST", `${issuePath}/comments`, { content: review.content, trigger_agents: true });
+    const review = renderReview(items, { teamId: VERCEL_TEAM_ID });
+    const comment = await multica(auth, "POST", `/issues/${encodeURIComponent(issueId)}/comments`, {
+      content: review.content,
+      trigger_agents: true,
+    });
+    for (const { thread, ledger } of review.sent) {
+      try {
+        await writeLedger(auth, thread.id, record(ledger, issueId, thread));
+      } catch (error) {
+        console.error(`thread ${thread.id}: sent to issue ${issueId} but not recorded: ${error.message}`);
+      }
+    }
     return { comment_id: comment.id, threads: review.sent.map(({ thread }) => thread.id), remaining: review.remaining };
   });
 }
@@ -275,6 +254,32 @@ async function sendPreviewReviewNow(body) {
 
 // --- The poller ---
 
+// Marks the records of threads that are no longer open, so a reopen is
+// recognised, and drops them after CLOSED_RETENTION_MS.
+const closedAtCache = new Map();
+async function recordClosedThreads(auth, openIds) {
+  const { keys = [] } = await multica(auth, "GET", "/storage/workspace");
+  for (const { key } of keys) {
+    if (!key.startsWith(LEDGER_PREFIX)) continue;
+    const threadId = decodeURIComponent(key.slice(LEDGER_PREFIX.length));
+    if (openIds.has(threadId)) {
+      closedAtCache.delete(threadId);
+      continue;
+    }
+    let closedAt = closedAtCache.get(threadId);
+    if (closedAt === undefined) {
+      const ledger = await readLedger(auth, threadId);
+      closedAt = ledger.closedAt ?? Date.now();
+      if (!ledger.closedAt) await writeLedger(auth, threadId, { sent: ledger.sent, closedAt });
+      closedAtCache.set(threadId, closedAt);
+    }
+    if (Date.now() - closedAt > CLOSED_RETENTION_MS) {
+      await multica(auth, "DELETE", ledgerPath(threadId));
+      closedAtCache.delete(threadId);
+    }
+  }
+}
+
 // Branches whose current comments were already handled, keyed by project and
 // branch, so an idle review costs one Vercel call per tick and nothing else.
 const handled = new Map();
@@ -295,7 +300,7 @@ async function sendBranch(auth, threads) {
     for (const issueId of pr.issue_ids) {
       const result = await sendReview(auth, issueId, threads.map((thread) => ({ pr, thread })));
       if (!result) continue;
-      console.log(`${repo.owner}/${repo.name}@${branch}: sent ${result.threads.length} comments to issue ${issueId}`);
+      console.log(`${repo.owner}/${repo.name}@${branch}: sent ${result.threads.length} threads to issue ${issueId}`);
       if (result.remaining) done = false;
     }
   }
@@ -304,21 +309,24 @@ async function sendBranch(auth, threads) {
 
 async function pollOnce() {
   const auth = { base: `${MULTICA_API_URL}/v1`, token: PLUGIN_TOKEN };
+  const threads = await openThreads();
+  await exclusive(() => recordClosedThreads(auth, new Set(threads.map((thread) => thread.id))));
+
   const branches = new Map();
-  for (const thread of await openThreads()) {
+  for (const thread of threads) {
     const key = `${thread.projectId} ${thread.branch}`;
     if (!branches.has(key)) branches.set(key, []);
     branches.get(key).push(thread);
   }
   for (const key of handled.keys()) if (!branches.has(key)) handled.delete(key);
 
-  for (const [key, threads] of branches) {
-    const fingerprint = threads.flatMap(messageIds).sort().join(" ");
+  for (const [key, branchThreads] of branches) {
+    const fingerprint = branchThreads.flatMap(messageIds).sort().join(" ");
     if (handled.get(key) === fingerprint) continue;
     // Still reviewing: wait until the newest comment has gone quiet.
-    if (Date.now() - Math.max(...threads.map(lastActivity)) < QUIET_MS) continue;
+    if (Date.now() - Math.max(...branchThreads.map(lastActivity)) < QUIET_MS) continue;
     try {
-      if (await sendBranch(auth, threads)) handled.set(key, fingerprint);
+      if (await sendBranch(auth, branchThreads)) handled.set(key, fingerprint);
     } catch (error) {
       console.error(`${key}: ${error.message}`);
     }
@@ -374,7 +382,7 @@ const server = createServer(
       }
       try {
         const result = await sendPreviewReviewNow(body);
-        console.log(`issue ${body.issue_id}: sent ${result.threads.length} comments on request`);
+        console.log(`issue ${body.issue_id}: sent ${result.threads.length} threads on request`);
         reply(response, 200, result);
       } catch (error) {
         const status = error instanceof HttpError ? error.status : 502;
