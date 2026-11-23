@@ -41,6 +41,25 @@ export function record(ledger, issueId, thread, commentId) {
   return ledger.closedAt || ledger.reopened ? { sent, reopened: true } : { sent };
 }
 
+// --- Which branch a comment is on ---
+
+// The branch a Vercel deployment was built from. Git-integration deployments
+// name it in <provider>CommitRef. The CLI records the checkout's ref in
+// gitCommitRef, which is "HEAD" on a detached checkout, and the branch it was
+// built from in githubRef.
+export function deploymentBranch(deployment) {
+  const meta = deployment?.meta ?? {};
+  const refs = [
+    meta.githubCommitRef,
+    meta.gitlabCommitRef,
+    meta.bitbucketCommitRef,
+    meta.githubRef,
+    deployment?.gitSource?.ref,
+    meta.gitCommitRef,
+  ];
+  return refs.find((ref) => typeof ref === "string" && ref !== "" && ref !== "HEAD") ?? null;
+}
+
 // --- Rendering ---
 
 // Everything from Vercel is reviewer input. It must not mention or wake anyone

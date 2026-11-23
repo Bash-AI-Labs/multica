@@ -43,8 +43,9 @@ The container checks the team's open toolbar threads every 30 seconds and
 groups them by Vercel project and branch. A group is sent once its newest
 message is two minutes old, to the issues linked to an open or draft pull
 request from that branch of the project's repository. Branch names like `main`
-repeat across projects, so the repository has to match too. Previews deployed
-from the CLI report the branch `HEAD` and are not matched.
+repeat across projects, so the repository has to match too. A comment on a
+preview deployed with the Vercel CLI reports the branch `HEAD`; the service
+reads the branch the deployment was built from instead.
 
 The plugin's workspace storage records, per Vercel thread, which messages each
 issue received. A message is never sent to the same issue twice, across

@@ -26,7 +26,7 @@
 import { createServer } from "node:https";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { classify, record, renderReview } from "./review.mjs";
+import { classify, deploymentBranch, record, renderReview } from "./review.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 8787);
@@ -151,7 +151,7 @@ async function vercel(path, query = {}) {
   url.searchParams.set("teamId", VERCEL_TEAM_ID);
   for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
   const response = await fetch(url, { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } });
-  if (!response.ok) throw new Error(`Vercel ${url.pathname} answered ${response.status}`);
+  if (!response.ok) throw new UpstreamError(response.status, `Vercel ${url.pathname} answered ${response.status}`);
   return response.json();
 }
 
@@ -179,6 +179,32 @@ async function projectRepo(projectId) {
     projectRepos.set(projectId, owner && name ? { owner, name } : null);
   }
   return projectRepos.get(projectId);
+}
+
+const deploymentBranches = new Map();
+
+// The branch a thread's comments are about. A thread on a preview deployed
+// with the CLI reports "HEAD"; the deployment it was left on still records
+// the branch it was built from. Deployments never change, so each answer is
+// kept, including "none" for one that is gone.
+async function threadBranch(thread) {
+  if (thread.branch && thread.branch !== "HEAD") return thread.branch;
+  let host;
+  try {
+    host = new URL(thread.context?.href ?? "").host;
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+  if (!deploymentBranches.has(host)) {
+    try {
+      deploymentBranches.set(host, deploymentBranch(await vercel(`/v13/deployments/${encodeURIComponent(host)}`)));
+    } catch (error) {
+      if (!(error instanceof UpstreamError) || ![403, 404].includes(error.status)) throw error;
+      deploymentBranches.set(host, null);
+    }
+  }
+  return deploymentBranches.get(host);
 }
 
 const sameRepo = (repo, pr) =>
@@ -258,11 +284,13 @@ async function sendPreviewReviewNow(body) {
   const pullRequests = active.length ? active : linked.filter((pr) => pr.branch);
   if (!pullRequests.length) throw new HttpError(422, "the issue has no linked pull request with a branch");
 
+  const threads = await openThreads();
   const items = [];
   const seen = new Set();
   for (const pr of pullRequests) {
-    for (const thread of await openThreads({ branch: pr.branch })) {
-      if (seen.has(thread.id) || !sameRepo(await projectRepo(thread.projectId), pr)) continue;
+    for (const thread of threads) {
+      if (seen.has(thread.id) || (await threadBranch(thread)) !== pr.branch) continue;
+      if (!sameRepo(await projectRepo(thread.projectId), pr)) continue;
       seen.add(thread.id);
       items.push({ pr, thread });
     }
@@ -308,8 +336,8 @@ const handled = new Map();
 // known repository, or every issue linked to its open pull request has them.
 // False while no open pull request is linked, so a link made later still
 // picks the comments up.
-async function sendBranch(auth, threads) {
-  const { projectId, branch } = threads[0];
+async function sendBranch(auth, branch, threads) {
+  const { projectId } = threads[0];
   const repo = await projectRepo(projectId);
   if (!repo) return true;
   const query = new URLSearchParams({ repo_owner: repo.owner, repo_name: repo.name, branch });
@@ -334,19 +362,27 @@ async function pollOnce() {
 
   const branches = new Map();
   for (const thread of threads) {
-    const key = `${thread.projectId} ${thread.branch}`;
-    if (!branches.has(key)) branches.set(key, []);
-    branches.get(key).push(thread);
+    let branch;
+    try {
+      branch = await threadBranch(thread);
+    } catch (error) {
+      console.error(`thread ${thread.id}: ${error.message}`);
+      continue;
+    }
+    if (!branch) continue;
+    const key = `${thread.projectId} ${branch}`;
+    if (!branches.has(key)) branches.set(key, { branch, threads: [] });
+    branches.get(key).threads.push(thread);
   }
   for (const key of handled.keys()) if (!branches.has(key)) handled.delete(key);
 
-  for (const [key, branchThreads] of branches) {
+  for (const [key, { branch, threads: branchThreads }] of branches) {
     const fingerprint = branchThreads.flatMap(messageIds).sort().join(" ");
     if (handled.get(key) === fingerprint) continue;
     // Still reviewing: wait until the newest comment has gone quiet.
     if (Date.now() - Math.max(...branchThreads.map(lastActivity)) < QUIET_MS) continue;
     try {
-      if (await sendBranch(auth, branchThreads)) handled.set(key, fingerprint);
+      if (await sendBranch(auth, branch, branchThreads)) handled.set(key, fingerprint);
     } catch (error) {
       console.error(`${key}: ${error.message}`);
     }

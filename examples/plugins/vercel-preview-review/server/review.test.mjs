@@ -1,7 +1,7 @@
 // Run: node --test examples/plugins/vercel-preview-review/server/review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, record, renderReview, MAX_COMMENT_CHARS } from "./review.mjs";
+import { classify, deploymentBranch, record, renderReview, MAX_COMMENT_CHARS } from "./review.mjs";
 
 // server/internal/util/mention.go MentionRe: what Multica would dispatch on.
 const MENTION = /\[@?(.+?)\]\(mention:\/\/(member|agent|squad|issue|all)\/([0-9a-fA-F-]+|all)\)/;
@@ -86,4 +86,14 @@ test("a review larger than one comment sends the rest next time", () => {
   assert.equal(review.sent.length, 1);
   assert.equal(review.remaining, 2);
   assert.ok(review.content.length <= MAX_COMMENT_CHARS + 200);
+});
+
+test("a comment on a CLI preview belongs to the branch the deployment was built from", () => {
+  // Shape of a `vercel deploy` from an agent's detached checkout.
+  const cli = { meta: { gitCommitRef: "HEAD", githubRef: "agent/mac/67e5ea97d65f", gitCommitSha: "bdd5d525" } };
+  assert.equal(deploymentBranch(cli), "agent/mac/67e5ea97d65f");
+  assert.equal(deploymentBranch({ meta: { githubCommitRef: "feat/pricing" } }), "feat/pricing");
+  assert.equal(deploymentBranch({ meta: { gitCommitRef: "feat/cli-on-branch" } }), "feat/cli-on-branch");
+  assert.equal(deploymentBranch({ meta: { gitCommitRef: "HEAD" } }), null);
+  assert.equal(deploymentBranch({}), null);
 });
