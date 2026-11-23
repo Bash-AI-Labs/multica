@@ -1,0 +1,51 @@
+# Vercel preview review overlay. Add it after the compose files you already run:
+#
+#   docker compose -f docker-compose.selfhost.yml -f docker-compose.selfhost.build.yml \
+#     -f docker-compose.preview-review.yml up -d
+#
+# With the Tailscale overlay, list this file last and set
+# PREVIEW_REVIEW_MULTICA_API_URL=http://tailscale:4900 (the backend shares the
+# tailscale container's network there).
+#
+# Setup, including the .env values below, is in
+# examples/plugins/vercel-preview-review/README.md.
+
+services:
+  preview-review:
+    build: ./examples/plugins/vercel-preview-review/server
+    environment:
+      VERCEL_TOKEN: ${VERCEL_TOKEN:?VERCEL_TOKEN must be set for the preview review service}
+      VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:?VERCEL_TEAM_ID must be set for the preview review service}
+      # Shown once when an admin rotates the plugin's token; empty until the
+      # plugin is installed, during which the service refuses hooks.
+      MULTICA_SIGNING_SECRET: ${PREVIEW_REVIEW_SIGNING_SECRET:-}
+      MULTICA_API_URL: ${PREVIEW_REVIEW_MULTICA_API_URL:-http://backend:8080}
+    volumes:
+      - preview-review-tls:/tls
+    networks:
+      default:
+        # net: scopes need a dotted host name.
+        aliases: [preview-review.internal]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(8787,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    depends_on:
+      # The backend reads MULTICA_PLUGIN_DEV_CA once at startup, so the
+      # certificate has to exist first.
+      preview-review:
+        condition: service_healthy
+    environment:
+      FF_PLUGINS_V1: ${FF_PLUGINS_V1:-true}
+      MULTICA_PLUGIN_DEV_ORIGINS: https://preview-review.internal:8787
+      MULTICA_PLUGIN_DEV_CA: /preview-review-tls/cert.pem
+    volumes:
+      - preview-review-tls:/preview-review-tls:ro
+
+volumes:
+  preview-review-tls:
