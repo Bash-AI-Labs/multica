@@ -11,8 +11,22 @@
 # examples/plugins/vercel-preview-review/README.md.
 
 services:
-  preview-review:
+  # Issues the hook certificate and exits. The backend reads MULTICA_PLUGIN_DEV_CA
+  # once at startup, so it waits for this, not for the service below.
+  preview-review-cert:
+    image: multica-preview-review:dev
     build: ./examples/plugins/vercel-preview-review/server
+    command: ["--cert-only"]
+    volumes:
+      - preview-review-tls:/tls
+    restart: "no"
+
+  preview-review:
+    image: multica-preview-review:dev
+    build: ./examples/plugins/vercel-preview-review/server
+    depends_on:
+      preview-review-cert:
+        condition: service_completed_successfully
     environment:
       VERCEL_TOKEN: ${VERCEL_TOKEN:?VERCEL_TOKEN must be set for the preview review service}
       VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:?VERCEL_TEAM_ID must be set for the preview review service}
@@ -42,10 +56,8 @@ services:
 
   backend:
     depends_on:
-      # The backend reads MULTICA_PLUGIN_DEV_CA once at startup, so the
-      # certificate has to exist first.
-      preview-review:
-        condition: service_healthy
+      preview-review-cert:
+        condition: service_completed_successfully
     environment:
       FF_PLUGINS_V1: ${FF_PLUGINS_V1:-true}
       MULTICA_PLUGIN_DEV_ORIGINS: https://preview-review.internal:8787
