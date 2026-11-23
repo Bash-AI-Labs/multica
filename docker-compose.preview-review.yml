@@ -16,10 +16,16 @@ services:
     environment:
       VERCEL_TOKEN: ${VERCEL_TOKEN:?VERCEL_TOKEN must be set for the preview review service}
       VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:?VERCEL_TEAM_ID must be set for the preview review service}
-      # Shown once when an admin rotates the plugin's token; empty until the
-      # plugin is installed, during which the service refuses hooks.
+      # Both are shown once when an admin rotates the plugin's token. Until
+      # they are set the service refuses the issue action (signing secret) and
+      # does not send reviews on its own (plugin token).
       MULTICA_SIGNING_SECRET: ${PREVIEW_REVIEW_SIGNING_SECRET:-}
+      MULTICA_PLUGIN_TOKEN: ${PREVIEW_REVIEW_PLUGIN_TOKEN:-}
       MULTICA_API_URL: ${PREVIEW_REVIEW_MULTICA_API_URL:-http://backend:8080}
+      # A review goes out once a preview branch has had no new comment for
+      # QUIET_SECONDS; Vercel is checked every POLL_SECONDS.
+      QUIET_SECONDS: ${PREVIEW_REVIEW_QUIET_SECONDS:-120}
+      POLL_SECONDS: ${PREVIEW_REVIEW_POLL_SECONDS:-30}
     volumes:
       - preview-review-tls:/tls
     networks:

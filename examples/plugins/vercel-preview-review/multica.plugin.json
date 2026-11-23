@@ -2,14 +2,15 @@
   "manifest_version": 1,
   "key": "ai.multica.vercel-preview-review",
   "name": "Vercel Preview Review",
-  "description": "Collects the open Vercel Toolbar comments on an issue's pull request previews and sends them to the issue's agent as one comment.",
-  "version": "1.0.0",
+  "description": "Sends the open Vercel Toolbar comments on an issue's pull request previews to the issue's agent once the reviewer stops commenting, as one comment.",
+  "version": "1.1.0",
   "author": {
     "name": "multica",
     "url": "https://multica.ai"
   },
   "scopes": [
     "issues:read",
+    "comments:read",
     "comments:write",
     "tasks:write",
     "net:preview-review.internal"
@@ -19,7 +20,7 @@
       {
         "key": "send_preview_review",
         "name": "Send preview review to agent",
-        "description": "Posts every open Vercel preview comment on the linked pull request branches as one comment, which wakes the assigned agent.",
+        "description": "Sends the new Vercel preview comments on the linked pull request branches now, without waiting for the reviewer to go quiet.",
         "triggers": [
           "manual"
         ],
