@@ -85,6 +85,26 @@ type CommentListResponse struct {
 type CreateCommentRequest struct {
 	Content  string  `json:"content"`
 	ParentID *string `json:"parent_id,omitempty"`
+	// TriggerAgents runs the same agent triggers a member's own comment would.
+	// It needs the tasks:write grant and a person behind the call.
+	TriggerAgents bool `json:"trigger_agents,omitempty"`
+}
+
+type PullRequest struct {
+	ID        string  `json:"id"`
+	Provider  string  `json:"provider"`
+	RepoOwner string  `json:"repo_owner"`
+	RepoName  string  `json:"repo_name"`
+	Number    int32   `json:"number"`
+	Title     string  `json:"title"`
+	State     string  `json:"state"`
+	HTMLURL   string  `json:"html_url"`
+	Branch    *string `json:"branch"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type PullRequestListResponse struct {
+	PullRequests []PullRequest `json:"pull_requests"`
 }
 
 type StorageKey struct {

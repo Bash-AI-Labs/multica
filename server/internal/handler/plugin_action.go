@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -617,11 +618,12 @@ func publicPluginComment(comment db.Comment) publicapiv1.Comment {
 // The comment is authored BY THE USER and marked with the plugin that produced
 // it, so the timeline can render "Jiayuan (via Hello Panel)".
 //
-// It deliberately does not run the @mention trigger dispatch that the ordinary
+// By default it does not run the @mention trigger dispatch that the ordinary
 // comment endpoint does. A plugin that could post a mention could start agent
 // runs — and spend the workspace's budget — from a surface the user only meant
-// to click a button in. Plugins that want to start work will get an explicit
-// hook for it rather than inheriting it as a side effect of posting text.
+// to click a button in. Starting work is the explicit `trigger_agents` opt-in
+// instead: it needs the tasks:write grant the admin saw on the consent screen,
+// and a person behind the call whose own invoke permissions then apply.
 func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeCommentsWrite)
 	if !ok {
@@ -645,6 +647,15 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	if len(content) > maxCommentContentBytes {
 		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "content is too long")
 		return
+	}
+	if req.TriggerAgents {
+		if !hasGrantedScope(caller.Scopes, plugincontract.ScopeTasksWrite) {
+			publicapiv1.WriteProblem(w, r, http.StatusForbidden, "missing_scope", "this Plugin was not granted the "+plugincontract.ScopeTasksWrite+" scope")
+			return
+		}
+		if !actor.requireMember(w, r) {
+			return
+		}
 	}
 
 	var parentID pgtype.UUID
@@ -708,8 +719,62 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	if rootComment != nil {
 		h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(caller.WorkspaceID), authorType, uuidToString(authorID), pgtype.UUID{})
 	}
+	if req.TriggerAgents {
+		member := uuidToString(authorID)
+		h.triggerTasksForComment(r.Context(), issue, comment, rootComment, authorType, member, member, nil, commentSteerRequest{})
+	}
 
 	writeJSON(w, http.StatusCreated, publicPluginComment(comment))
+}
+
+// ListPluginPullRequests — GET /v1/issues/{issue_ref}/pull-requests
+//
+// Every provider's links, newest first, without the CI / merge snapshot the
+// issue page renders.
+func (h *Handler) ListPluginPullRequests(w http.ResponseWriter, r *http.Request) {
+	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	if !ok {
+		return
+	}
+	issue, ok := h.pluginIssueForUser(w, r, caller, chi.URLParam(r, "issue_ref"))
+	if !ok {
+		return
+	}
+	githubRows, err := h.Queries.ListPullRequestsByIssue(r.Context(), issue.ID)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+	vcsRows, err := h.Queries.ListVCSPullRequestsByIssue(r.Context(), issue.ID)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+	linked := make([]GitHubPullRequestResponse, 0, len(githubRows)+len(vcsRows))
+	for _, row := range githubRows {
+		linked = append(linked, issuePullRequestRowToResponse(row, false))
+	}
+	for _, row := range vcsRows {
+		linked = append(linked, vcsPullRequestRowToResponse(row))
+	}
+	sort.SliceStable(linked, func(i, j int) bool { return linked[i].PRCreatedAt > linked[j].PRCreatedAt })
+
+	payload := make([]publicapiv1.PullRequest, 0, len(linked))
+	for _, pr := range linked {
+		payload = append(payload, publicapiv1.PullRequest{
+			ID:        pr.ID,
+			Provider:  pr.Provider,
+			RepoOwner: pr.RepoOwner,
+			RepoName:  pr.RepoName,
+			Number:    pr.Number,
+			Title:     pr.Title,
+			State:     pr.State,
+			HTMLURL:   pr.HtmlURL,
+			Branch:    pr.Branch,
+			CreatedAt: pr.PRCreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, publicapiv1.PullRequestListResponse{PullRequests: payload})
 }
 
 // maxPluginCommentsPerRead bounds one read. The query returns the NEWEST N in

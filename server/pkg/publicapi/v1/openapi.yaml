@@ -91,6 +91,12 @@ paths:
     post:
       operationId: createIssueComment
       summary: Create an issue comment without mention dispatch
+      description: >-
+        Mentions are not dispatched by default. Set trigger_agents to run the
+        same agent triggers the calling member's own comment would (mentions,
+        then the agent assignee). That requires the tasks:write grant and a
+        member credential; a call acting as the Plugin itself is refused with
+        member_required.
       x-multica-contract: shared_resource
       x-multica-scope: comments:write
       requestBody:
@@ -106,6 +112,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Comment"
+        default:
+          $ref: "#/components/responses/Problem"
+  /issues/{issue_ref}/pull-requests:
+    parameters:
+      - $ref: "#/components/parameters/IssueRef"
+    get:
+      operationId: listIssuePullRequests
+      summary: List the pull requests linked to an issue, newest first
+      x-multica-contract: shared_resource
+      x-multica-scope: issues:read
+      responses:
+        "200":
+          description: Linked pull requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequestListResponse"
         default:
           $ref: "#/components/responses/Problem"
   /tasks/{task_id}/messages:
@@ -449,6 +472,32 @@ components:
       properties:
         content: { type: string, maxLength: 65536 }
         parent_id: { type: string }
+        trigger_agents:
+          type: boolean
+          default: false
+          description: Run agent triggers as the calling member. Requires tasks:write.
+    PullRequest:
+      type: object
+      required: [id, provider, repo_owner, repo_name, number, title, state, html_url, branch, created_at]
+      properties:
+        id: { type: string }
+        provider: { type: string, description: "github, forgejo, gitea, or gitlab" }
+        repo_owner: { type: string }
+        repo_name: { type: string }
+        number: { type: integer }
+        title: { type: string }
+        state: { type: string, description: "open, draft, merged, or closed" }
+        html_url: { type: string }
+        branch: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    PullRequestListResponse:
+      type: object
+      required: [pull_requests]
+      properties:
+        pull_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/PullRequest"
     StorageKey:
       type: object
       required: [key, size_bytes, updated_at]

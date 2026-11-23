@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	publicapiv1 "github.com/multica-ai/multica/server/pkg/publicapi/v1"
 )
 
@@ -382,6 +383,110 @@ func TestPluginCommentIsAuthoredByTheUserAndMarkedWithThePlugin(t *testing.T) {
 	}
 	if viaPlugin == nil || *viaPlugin != installationID {
 		t.Fatalf("via_plugin_id = %v, want %s", viaPlugin, installationID)
+	}
+}
+
+func TestPluginCommentTriggerAgentsWakesTheAssignee(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
+	agentID := createHandlerTestAgent(t, "Plugin Review Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin review wakes the assignee", "agent", agentID)
+
+	post := func(body map[string]any) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID,
+			body, map[string]string{"issue_ref": issueID}))
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("create comment status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	post(map[string]any{"content": "plain plugin comment"})
+	if got := countQueuedCommentTriggerTasks(t, issueID, agentID); got != 0 {
+		t.Fatalf("comment without trigger_agents queued %d tasks, want 0", got)
+	}
+	post(map[string]any{"content": "preview review is ready", "trigger_agents": true})
+	if got := countQueuedCommentTriggerTasks(t, issueID, agentID); got != 1 {
+		t.Fatalf("trigger_agents queued %d tasks, want 1", got)
+	}
+}
+
+func TestPluginCommentTriggerAgentsNeedsTasksWriteAndAPerson(t *testing.T) {
+	agentID := createHandlerTestAgent(t, "Plugin Refused Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger refusals", "agent", agentID)
+	body := map[string]any{"content": "wake up", "trigger_agents": true}
+	params := map[string]string{"issue_ref": issueID}
+
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write"})
+	recorder := httptest.NewRecorder()
+	testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID, body, params))
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "tasks:write") {
+		t.Fatalf("trigger without tasks:write status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	installationID = installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
+	token, err := testHandler.PluginService.IssueInstallToken(context.Background(), parseUUID(installationID))
+	if err != nil {
+		t.Fatalf("issue install token: %v", err)
+	}
+	recorder = httptest.NewRecorder()
+	testHandler.CreatePluginComment(recorder, pluginInstallTokenRequest(http.MethodPost, "/v1/issues/"+issueID+"/comments", token, body, params))
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "member_required") {
+		t.Fatalf("trigger as the plugin itself status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var comments int
+	dbfx.QueryRow(t, `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&comments)
+	if comments != 0 || countQueuedCommentTriggerTasks(t, issueID, agentID) != 0 {
+		t.Fatalf("refused triggers left comments=%d queued=%d", comments, countQueuedCommentTriggerTasks(t, issueID, agentID))
+	}
+}
+
+func TestPluginListsLinkedPullRequestsNewestFirst(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read"})
+	issueID := createTestIssue(t, "Plugin pull request list", "todo", "none")
+	linkPR := func(number int, state, branch, createdAt string) {
+		prID := dbfx.Insert(t, "github_pull_request", testutil.Cols{
+			"workspace_id":    testWorkspaceID,
+			"installation_id": 1,
+			"repo_owner":      "acme",
+			"repo_name":       "plugin-pr-list",
+			"pr_number":       number,
+			"title":           fmt.Sprintf("PR %d", number),
+			"state":           state,
+			"html_url":        fmt.Sprintf("https://github.com/acme/plugin-pr-list/pull/%d", number),
+			"branch":          branch,
+			"head_sha":        "abc",
+			"pr_created_at":   testutil.Raw(createdAt),
+			"pr_updated_at":   testutil.Raw("now()"),
+		})
+		dbfx.InsertNoID(t, "issue_pull_request", testutil.Cols{"issue_id": issueID, "pull_request_id": prID},
+			"pull_request_id = $1", prID)
+	}
+	linkPR(41, "merged", "feat/older", "now() - interval '1 day'")
+	linkPR(42, "open", "feat/preview", "now()")
+
+	recorder := httptest.NewRecorder()
+	testHandler.ListPluginPullRequests(recorder, pluginActionRequest(http.MethodGet, "/pull-requests", installationID, nil,
+		map[string]string{"issue_ref": issueID}))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list pull requests status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var listed publicapiv1.PullRequestListResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode pull requests: %v", err)
+	}
+	if len(listed.PullRequests) != 2 {
+		t.Fatalf("pull requests = %+v, want 2", listed.PullRequests)
+	}
+	newest := listed.PullRequests[0]
+	if newest.Number != 42 || newest.State != "open" || newest.Provider != "github" ||
+		newest.Branch == nil || *newest.Branch != "feat/preview" ||
+		newest.HTMLURL != "https://github.com/acme/plugin-pr-list/pull/42" {
+		t.Fatalf("newest pull request = %+v", newest)
+	}
+	if listed.PullRequests[1].Number != 41 {
+		t.Fatalf("second pull request = %+v, want #41", listed.PullRequests[1])
 	}
 }
 
