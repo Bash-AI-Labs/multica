@@ -54,7 +54,7 @@ describe("web sessions in legacy token mode", () => {
     getBaseUrl.mockReturnValue("");
     const { wrapper } = setup();
     const hook = renderHook(() => useResignedInlineMedia(id, stable, true), { wrapper });
-    expect(hook.result.current).toEqual({ url: stable, pending: false });
+    expect(hook.result.current).toEqual({ url: stable, pending: false, failed: false });
     expect(getAttachment).not.toHaveBeenCalled();
   });
 

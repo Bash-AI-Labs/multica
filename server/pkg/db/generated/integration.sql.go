@@ -217,20 +217,30 @@ func (q *Queries) GetWorkspaceIntegrationByProvider(ctx context.Context, arg Get
 }
 
 const listExternalIssueLinksByWorkspace = `-- name: ListExternalIssueLinksByWorkspace :many
-SELECT id, workspace_id, issue_id, provider, external_id, external_identifier, external_url, last_synced_at, sync_direction, created_at FROM external_issue_link
-WHERE workspace_id = $1
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3
+SELECT l.id, l.workspace_id, l.issue_id, l.provider, l.external_id, l.external_identifier, l.external_url, l.last_synced_at, l.sync_direction, l.created_at FROM external_issue_link l
+JOIN issue i ON i.id = l.issue_id
+WHERE l.workspace_id = $1
+  AND ($2::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY($2::uuid[])))
+ORDER BY l.created_at DESC
+LIMIT $4 OFFSET $3
 `
 
 type ListExternalIssueLinksByWorkspaceParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Limit       int32       `json:"limit"`
-	Offset      int32       `json:"offset"`
+	WorkspaceID      pgtype.UUID   `json:"workspace_id"`
+	HiddenProjectIds []pgtype.UUID `json:"hidden_project_ids"`
+	Offset           int32         `json:"offset"`
+	Limit            int32         `json:"limit"`
 }
 
+// Links whose issue is in a project the caller can see; hidden_project_ids is
+// NULL when nothing is hidden.
 func (q *Queries) ListExternalIssueLinksByWorkspace(ctx context.Context, arg ListExternalIssueLinksByWorkspaceParams) ([]ExternalIssueLink, error) {
-	rows, err := q.db.Query(ctx, listExternalIssueLinksByWorkspace, arg.WorkspaceID, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listExternalIssueLinksByWorkspace,
+		arg.WorkspaceID,
+		arg.HiddenProjectIds,
+		arg.Offset,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}

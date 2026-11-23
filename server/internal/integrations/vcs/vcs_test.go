@@ -409,7 +409,7 @@ func TestGitlabRepositoryReadable(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			got, err := (&gitlabProvider{}).RepositoryReadable(context.Background(), srv.URL, "group/sub", "repo", "tok")
+			got, err := (&gitlabProvider{}).RepositoryReadable(context.Background(), srv.URL, "group/sub", "repo", "tok", ValidationOptions{AllowPrivate: true})
 			if err != nil || got != tc.want {
 				t.Fatalf("got=%v err=%v want=%v", got, err, tc.want)
 			}

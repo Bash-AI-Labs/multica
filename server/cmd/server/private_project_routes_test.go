@@ -72,6 +72,7 @@ type outsideProjectParam struct {
 // not probed.
 var routeParamsOutsideProjects = map[string]outsideProjectParam{
 	"workspaces/{id}":                {why: "the workspace itself"},
+	"integrations/{id}":              {why: "a workspace integration; its links list hides private projects"},
 	"members/{memberId}":             {why: "a workspace membership"},
 	"invitations/{id}":               {why: "the caller's own workspace invitation"},
 	"invitations/{invitationId}":     {why: "a workspace invitation"},

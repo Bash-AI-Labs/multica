@@ -41,6 +41,11 @@ func seedLegacyCache(t *testing.T, repoURL string) (*Cache, string, string) {
 	if err := ensureRemoteTrackingLayout(legacyPath); err != nil {
 		t.Fatal(err)
 	}
+	// The clone came from a local path; record the URL the cache serves, as
+	// the daemon does for every cache it creates.
+	if err := recordCacheOriginURL(legacyPath, repoURL); err != nil {
+		t.Fatal(err)
+	}
 	return cache, legacyPath, filepath.Join(root, "workdir")
 }
 

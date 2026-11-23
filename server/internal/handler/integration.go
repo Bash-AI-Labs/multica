@@ -205,10 +205,15 @@ func (h *Handler) ListExternalLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hidden, ok := h.requestHiddenProjects(w, r, workspaceID)
+	if !ok {
+		return
+	}
 	links, err := h.Queries.ListExternalIssueLinksByWorkspace(r.Context(), db.ListExternalIssueLinksByWorkspaceParams{
-		WorkspaceID: parseUUID(workspaceID),
-		Limit:       100,
-		Offset:      0,
+		WorkspaceID:      parseUUID(workspaceID),
+		HiddenProjectIds: hidden.Param(),
+		Limit:            100,
+		Offset:           0,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list links")

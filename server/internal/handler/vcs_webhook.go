@@ -162,7 +162,9 @@ func (h *Handler) HandleVCSWebhook(w http.ResponseWriter, r *http.Request) {
 						writeError(w, http.StatusInternalServerError, "access token error")
 						return
 					}
-					readable, err := checker.RepositoryReadable(r.Context(), conn.InstanceUrl, pr.RepoOwner, pr.RepoName, token)
+					readable, err := checker.RepositoryReadable(r.Context(), conn.InstanceUrl, pr.RepoOwner, pr.RepoName, token, vcs.ValidationOptions{
+						AllowPrivate: vcs.PrivateNetworkAllowed(conn.InstanceUrl, h.cfg.VCSPrivateURLs),
+					})
 					if err != nil {
 						slog.Warn("vcs: system-hook repository access lookup failed", "provider", conn.Provider, "err", err)
 						writeError(w, http.StatusServiceUnavailable, "repository access lookup failed")

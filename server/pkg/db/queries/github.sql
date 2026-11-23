@@ -239,7 +239,7 @@ ORDER BY pr_created_at DESC;
 -- integration that only knows a branch (a preview deployment, a CI run) find
 -- the issues it belongs to.
 SELECT
-    ipr.issue_id,
+    ipr.issue_id, i.project_id AS issue_project_id,
     pr.id, 'github'::text AS provider, pr.repo_owner, pr.repo_name,
     pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
 FROM github_pull_request pr
@@ -252,7 +252,7 @@ WHERE pr.workspace_id = sqlc.arg('workspace_id')
   AND pr.branch = sqlc.arg('branch')::text
 UNION ALL
 SELECT
-    ipr.issue_id,
+    ipr.issue_id, i.project_id AS issue_project_id,
     pr.id, pr.provider, pr.repo_owner, pr.repo_name,
     pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
 FROM vcs_pull_request pr

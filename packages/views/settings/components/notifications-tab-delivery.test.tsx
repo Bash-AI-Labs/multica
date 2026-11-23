@@ -27,6 +27,10 @@ vi.mock("@multica/core/paths", () => ({
     slug: "acme",
   }),
   useRequiredWorkspaceSlug: () => "acme",
+  useWorkspacePaths: () => ({ inbox: () => "/acme/inbox" }),
+}));
+vi.mock("../../navigation", () => ({
+  AppLink: ({ href, children }: { href: string; children: ReactNode }) => <a href={href}>{children}</a>,
 }));
 vi.mock("@multica/core/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@multica/core/api")>()),

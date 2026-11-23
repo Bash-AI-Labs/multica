@@ -644,7 +644,7 @@ func (q *Queries) ListIssueIDsForPullRequest(ctx context.Context, pullRequestID 
 
 const listIssueLinksForPullRequestBranch = `-- name: ListIssueLinksForPullRequestBranch :many
 SELECT
-    ipr.issue_id,
+    ipr.issue_id, i.project_id AS issue_project_id,
     pr.id, 'github'::text AS provider, pr.repo_owner, pr.repo_name,
     pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
 FROM github_pull_request pr
@@ -657,7 +657,7 @@ WHERE pr.workspace_id = $1
   AND pr.branch = $4::text
 UNION ALL
 SELECT
-    ipr.issue_id,
+    ipr.issue_id, i.project_id AS issue_project_id,
     pr.id, pr.provider, pr.repo_owner, pr.repo_name,
     pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
 FROM vcs_pull_request pr
@@ -680,17 +680,18 @@ type ListIssueLinksForPullRequestBranchParams struct {
 }
 
 type ListIssueLinksForPullRequestBranchRow struct {
-	IssueID     pgtype.UUID        `json:"issue_id"`
-	ID          pgtype.UUID        `json:"id"`
-	Provider    string             `json:"provider"`
-	RepoOwner   string             `json:"repo_owner"`
-	RepoName    string             `json:"repo_name"`
-	PrNumber    int32              `json:"pr_number"`
-	Title       string             `json:"title"`
-	State       string             `json:"state"`
-	HtmlUrl     string             `json:"html_url"`
-	Branch      pgtype.Text        `json:"branch"`
-	PrCreatedAt pgtype.Timestamptz `json:"pr_created_at"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	IssueProjectID pgtype.UUID        `json:"issue_project_id"`
+	ID             pgtype.UUID        `json:"id"`
+	Provider       string             `json:"provider"`
+	RepoOwner      string             `json:"repo_owner"`
+	RepoName       string             `json:"repo_name"`
+	PrNumber       int32              `json:"pr_number"`
+	Title          string             `json:"title"`
+	State          string             `json:"state"`
+	HtmlUrl        string             `json:"html_url"`
+	Branch         pgtype.Text        `json:"branch"`
+	PrCreatedAt    pgtype.Timestamptz `json:"pr_created_at"`
 }
 
 // Every issue -> PR link in the workspace whose PR comes from one head branch
@@ -714,6 +715,7 @@ func (q *Queries) ListIssueLinksForPullRequestBranch(ctx context.Context, arg Li
 		var i ListIssueLinksForPullRequestBranchRow
 		if err := rows.Scan(
 			&i.IssueID,
+			&i.IssueProjectID,
 			&i.ID,
 			&i.Provider,
 			&i.RepoOwner,

@@ -47,10 +47,14 @@ SELECT * FROM external_issue_link
 WHERE issue_id = $1;
 
 -- name: ListExternalIssueLinksByWorkspace :many
-SELECT * FROM external_issue_link
-WHERE workspace_id = $1
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3;
+-- Links whose issue is in a project the caller can see; hidden_project_ids is
+-- NULL when nothing is hidden.
+SELECT l.* FROM external_issue_link l
+JOIN issue i ON i.id = l.issue_id
+WHERE l.workspace_id = sqlc.arg('workspace_id')
+  AND (sqlc.narg('hidden_project_ids')::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY(sqlc.narg('hidden_project_ids')::uuid[])))
+ORDER BY l.created_at DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
 -- name: UpdateExternalIssueLinkSyncedAt :exec
 UPDATE external_issue_link SET last_synced_at = now()

@@ -826,7 +826,7 @@ func (h *Handler) pluginAuthorName(ctx context.Context, comment db.Comment) stri
 
 // ListPluginPullRequestsByBranch — GET /v1/pull-requests
 func (h *Handler) ListPluginPullRequestsByBranch(w http.ResponseWriter, r *http.Request) {
-	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
 	if !ok {
 		return
 	}
@@ -846,11 +846,23 @@ func (h *Handler) ListPluginPullRequestsByBranch(w http.ResponseWriter, r *http.
 		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
 		return
 	}
+	// A call acting as a person sees only the issues in projects they can
+	// see, as pluginIssueForUser does for a single issue.
+	var hidden projectaccess.Hidden
+	if actor.isMember() {
+		if hidden, err = projectaccess.ForMember(r.Context(), h.Queries, actor.Member); err != nil {
+			publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to resolve project access")
+			return
+		}
+	}
 
 	payload := make([]publicapiv1.LinkedPullRequest, 0, len(rows))
 	index := map[string]int{}
 	for _, row := range rows {
 		if caller.IssueScope.Valid && uuidToString(row.IssueID) != uuidToString(caller.IssueScope) {
+			continue
+		}
+		if actor.isMember() && !hidden.CanSeeProject(row.IssueProjectID) {
 			continue
 		}
 		id := uuidToString(row.ID)
@@ -884,11 +896,11 @@ func (h *Handler) ListPluginPullRequestsByBranch(w http.ResponseWriter, r *http.
 // Every provider's links, newest first, without the CI / merge snapshot the
 // issue page renders.
 func (h *Handler) ListPluginPullRequests(w http.ResponseWriter, r *http.Request) {
-	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
 	if !ok {
 		return
 	}
-	issue, ok := h.pluginIssueForUser(w, r, caller, chi.URLParam(r, "issue_ref"))
+	issue, ok := h.pluginIssueForUser(w, r, caller, actor, chi.URLParam(r, "issue_ref"))
 	if !ok {
 		return
 	}

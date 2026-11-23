@@ -79,11 +79,11 @@ func TestRepositoryCachePathRejectsWorkspaceTraversal(t *testing.T) {
 	}
 }
 
-func TestBareDirNameEscapesSeparatorCharacters(t *testing.T) {
+func TestLegacyBareDirNameEscapesSeparatorCharacters(t *testing.T) {
 	t.Parallel()
 
-	withSlash := bareDirName("https://example.com/a/b.git")
-	withPlus := bareDirName("https://example.com/a+b.git")
+	withSlash := legacyBareDirName("https://example.com/a/b.git")
+	withPlus := legacyBareDirName("https://example.com/a+b.git")
 	if withSlash == withPlus {
 		t.Fatalf("cache names collided: %q", withSlash)
 	}

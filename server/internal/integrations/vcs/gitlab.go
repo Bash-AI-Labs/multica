@@ -255,19 +255,30 @@ func (gitlabProvider) ValidateToken(ctx context.Context, instanceURL, token stri
 // RepositoryReadable checks the exact project named by a system-hook event.
 // /user validation only proves that the token is valid, not that it can read
 // every private project listed in a workspace.
-func (gitlabProvider) RepositoryReadable(ctx context.Context, instanceURL, owner, name, token string) (bool, error) {
+func (gitlabProvider) RepositoryReadable(ctx context.Context, instanceURL, owner, name, token string, options ValidationOptions) (bool, error) {
 	// Finish authorization before GitLab's webhook delivery window expires.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	project := url.PathEscape(owner + "/" + name)
-	endpoint := NormalizeInstanceURL(instanceURL) + "/api/v4/projects/" + project
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	endpoint, err := validationEndpoint(instanceURL, "/api/v4/projects")
+	if err != nil {
+		return false, fmt.Errorf("gitlab: build project endpoint: %w", err)
+	}
+	// GitLab names a project by its full path with the slashes encoded.
+	project := owner + "/" + name
+	prefix := endpoint.EscapedPath()
+	endpoint.Path += "/" + project
+	endpoint.RawPath = prefix + "/" + url.PathEscape(project)
+	client, err := httptransport.NewRestrictedClient(endpoint, 5*time.Second, options.AllowPrivate)
+	if err != nil {
+		return false, fmt.Errorf("gitlab: build client: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return false, fmt.Errorf("gitlab: build project request: %w", err)
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("gitlab: project request: %w", err)
 	}
