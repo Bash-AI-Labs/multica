@@ -623,7 +623,7 @@ func publicPluginComment(comment db.Comment) publicapiv1.Comment {
 // runs — and spend the workspace's budget — from a surface the user only meant
 // to click a button in. Starting work is the explicit `trigger_agents` opt-in
 // instead: it needs the tasks:write grant the admin saw on the consent screen,
-// and a person behind the call whose own invoke permissions then apply.
+// and runs under a member's own invoke permissions (see pluginTriggerMember).
 func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeCommentsWrite)
 	if !ok {
@@ -648,12 +648,13 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "content is too long")
 		return
 	}
+	var triggerMember db.Member
 	if req.TriggerAgents {
 		if !hasGrantedScope(caller.Scopes, plugincontract.ScopeTasksWrite) {
 			publicapiv1.WriteProblem(w, r, http.StatusForbidden, "missing_scope", "this Plugin was not granted the "+plugincontract.ScopeTasksWrite+" scope")
 			return
 		}
-		if !actor.requireMember(w, r) {
+		if triggerMember, ok = h.pluginTriggerMember(w, r, caller, actor); !ok {
 			return
 		}
 	}
@@ -680,9 +681,15 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	// call keeps their own name on the comment (via_plugin_id records that a
 	// plugin produced it); an event hook writes as the installation, because
 	// there is nobody to attribute it to.
+	//
+	// A comment that wakes agents is the exception: it is always written as the
+	// member whose authority starts the runs, because a run's accountable human
+	// is read from its trigger comment and a Plugin author resolves to nobody.
 	authorType := "member"
 	authorID := actor.Member.UserID
-	if !actor.isMember() {
+	if req.TriggerAgents {
+		authorID = triggerMember.UserID
+	} else if !actor.isMember() {
 		authorType = "plugin"
 		authorID = caller.Installation.ID
 	}
@@ -725,6 +732,80 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, publicPluginComment(comment))
+}
+
+// pluginTriggerMember is the person whose invoke permissions a trigger_agents
+// comment runs under: the member behind the call, or — when the Plugin acts as
+// itself, from a schedule or its own poller — the member who installed it and
+// granted tasks:write, the way an autopilot runs as its creator. Membership is
+// re-checked so a departed installer stops lending their authority.
+func (h *Handler) pluginTriggerMember(w http.ResponseWriter, r *http.Request, caller service.PluginActionCaller, actor pluginActor) (db.Member, bool) {
+	if actor.isMember() {
+		return actor.Member, true
+	}
+	installer := caller.Installation.InstalledBy
+	if installer.Valid {
+		if member, err := h.getWorkspaceMember(r.Context(), uuidToString(installer), uuidToString(caller.WorkspaceID)); err == nil {
+			return member, true
+		}
+	}
+	publicapiv1.WriteProblem(w, r, http.StatusForbidden, "installer_membership_revoked", "the member who installed this Plugin is no longer in the workspace; reinstall it to let it wake agents")
+	return db.Member{}, false
+}
+
+// ListPluginPullRequestsByBranch — GET /v1/pull-requests
+func (h *Handler) ListPluginPullRequestsByBranch(w http.ResponseWriter, r *http.Request) {
+	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	params := db.ListIssueLinksForPullRequestBranchParams{
+		WorkspaceID: caller.WorkspaceID,
+		RepoOwner:   strings.TrimSpace(query.Get("repo_owner")),
+		RepoName:    strings.TrimSpace(query.Get("repo_name")),
+		Branch:      query.Get("branch"),
+	}
+	if params.RepoOwner == "" || params.RepoName == "" || params.Branch == "" {
+		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "repo_owner, repo_name and branch are required")
+		return
+	}
+	rows, err := h.Queries.ListIssueLinksForPullRequestBranch(r.Context(), params)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+
+	payload := make([]publicapiv1.LinkedPullRequest, 0, len(rows))
+	index := map[string]int{}
+	for _, row := range rows {
+		if caller.IssueScope.Valid && uuidToString(row.IssueID) != uuidToString(caller.IssueScope) {
+			continue
+		}
+		id := uuidToString(row.ID)
+		at, seen := index[id]
+		if !seen {
+			at = len(payload)
+			index[id] = at
+			payload = append(payload, publicapiv1.LinkedPullRequest{
+				PullRequest: publicapiv1.PullRequest{
+					ID:        id,
+					Provider:  row.Provider,
+					RepoOwner: row.RepoOwner,
+					RepoName:  row.RepoName,
+					Number:    row.PrNumber,
+					Title:     row.Title,
+					State:     row.State,
+					HTMLURL:   row.HtmlUrl,
+					Branch:    textToPtr(row.Branch),
+					CreatedAt: timestampToString(row.PrCreatedAt),
+				},
+				IssueIDs: []string{},
+			})
+		}
+		payload[at].IssueIDs = append(payload[at].IssueIDs, uuidToString(row.IssueID))
+	}
+	writeJSON(w, http.StatusOK, publicapiv1.LinkedPullRequestListResponse{PullRequests: payload})
 }
 
 // ListPluginPullRequests — GET /v1/issues/{issue_ref}/pull-requests

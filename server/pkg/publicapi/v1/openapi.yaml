@@ -93,10 +93,13 @@ paths:
       summary: Create an issue comment without mention dispatch
       description: >-
         Mentions are not dispatched by default. Set trigger_agents to run the
-        same agent triggers the calling member's own comment would (mentions,
-        then the agent assignee). That requires the tasks:write grant and a
-        member credential; a call acting as the Plugin itself is refused with
-        member_required.
+        same agent triggers a member's own comment would (mentions, then the
+        agent assignee). That requires the tasks:write grant. A member
+        credential runs them as that member; a call acting as the Plugin itself
+        runs them for the member who installed it, who granted tasks:write.
+        Either way the comment is authored by that member and marked with the
+        Plugin. If the installer has left the workspace the call is refused
+        with installer_membership_revoked.
       x-multica-contract: shared_resource
       x-multica-scope: comments:write
       requestBody:
@@ -129,6 +132,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PullRequestListResponse"
+        default:
+          $ref: "#/components/responses/Problem"
+  /pull-requests:
+    get:
+      operationId: listPullRequestsByBranch
+      summary: Find the linked pull requests from one branch of one repository
+      description: >-
+        Returns, newest first, the workspace's pull requests from the given head
+        branch that are linked to at least one issue, with the ids of those
+        issues. Owner and name match case-insensitively; the branch matches
+        exactly. Capped at 200 issue links. An issue-scoped callback sees only
+        its own issue.
+      x-multica-contract: shared_resource
+      x-multica-scope: issues:read
+      parameters:
+        - { name: repo_owner, in: query, required: true, schema: { type: string } }
+        - { name: repo_name, in: query, required: true, schema: { type: string } }
+        - { name: branch, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Linked pull requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkedPullRequestListResponse"
         default:
           $ref: "#/components/responses/Problem"
   /tasks/{task_id}/messages:
@@ -475,7 +503,7 @@ components:
         trigger_agents:
           type: boolean
           default: false
-          description: Run agent triggers as the calling member. Requires tasks:write.
+          description: Run agent triggers as a member (see createIssueComment). Requires tasks:write.
     PullRequest:
       type: object
       required: [id, provider, repo_owner, repo_name, number, title, state, html_url, branch, created_at]
@@ -498,6 +526,23 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PullRequest"
+    LinkedPullRequest:
+      allOf:
+        - $ref: "#/components/schemas/PullRequest"
+        - type: object
+          required: [issue_ids]
+          properties:
+            issue_ids:
+              type: array
+              items: { type: string }
+    LinkedPullRequestListResponse:
+      type: object
+      required: [pull_requests]
+      properties:
+        pull_requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinkedPullRequest"
     StorageKey:
       type: object
       required: [key, size_bytes, updated_at]

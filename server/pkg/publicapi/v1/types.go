@@ -86,7 +86,8 @@ type CreateCommentRequest struct {
 	Content  string  `json:"content"`
 	ParentID *string `json:"parent_id,omitempty"`
 	// TriggerAgents runs the same agent triggers a member's own comment would.
-	// It needs the tasks:write grant and a person behind the call.
+	// It needs the tasks:write grant. A call acting as the Plugin itself runs
+	// them for, and writes the comment as, the member who installed it.
 	TriggerAgents bool `json:"trigger_agents,omitempty"`
 }
 
@@ -105,6 +106,15 @@ type PullRequest struct {
 
 type PullRequestListResponse struct {
 	PullRequests []PullRequest `json:"pull_requests"`
+}
+
+type LinkedPullRequest struct {
+	PullRequest
+	IssueIDs []string `json:"issue_ids"`
+}
+
+type LinkedPullRequestListResponse struct {
+	PullRequests []LinkedPullRequest `json:"pull_requests"`
 }
 
 type StorageKey struct {

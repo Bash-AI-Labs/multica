@@ -411,34 +411,110 @@ func TestPluginCommentTriggerAgentsWakesTheAssignee(t *testing.T) {
 	}
 }
 
-func TestPluginCommentTriggerAgentsNeedsTasksWriteAndAPerson(t *testing.T) {
+func TestPluginCommentTriggerAgentsNeedsTasksWrite(t *testing.T) {
 	agentID := createHandlerTestAgent(t, "Plugin Refused Assignee", nil)
-	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger refusals", "agent", agentID)
-	body := map[string]any{"content": "wake up", "trigger_agents": true}
-	params := map[string]string{"issue_ref": issueID}
+	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger refusal", "agent", agentID)
 
 	installationID := installPluginForAction(t, []string{"issues:read", "comments:write"})
 	recorder := httptest.NewRecorder()
-	testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID, body, params))
+	testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID,
+		map[string]any{"content": "wake up", "trigger_agents": true}, map[string]string{"issue_ref": issueID}))
 	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "tasks:write") {
 		t.Fatalf("trigger without tasks:write status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	var comments int
+	dbfx.QueryRow(t, `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&comments)
+	if comments != 0 || countQueuedCommentTriggerTasks(t, issueID, agentID) != 0 {
+		t.Fatalf("refused trigger left comments=%d queued=%d", comments, countQueuedCommentTriggerTasks(t, issueID, agentID))
+	}
+}
 
-	installationID = installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
+func TestPluginOwnTriggerRunsForTheInstaller(t *testing.T) {
+	agentID := createHandlerTestAgent(t, "Plugin Installer Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger as installer", "agent", agentID)
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
 	token, err := testHandler.PluginService.IssueInstallToken(context.Background(), parseUUID(installationID))
 	if err != nil {
 		t.Fatalf("issue install token: %v", err)
 	}
-	recorder = httptest.NewRecorder()
-	testHandler.CreatePluginComment(recorder, pluginInstallTokenRequest(http.MethodPost, "/v1/issues/"+issueID+"/comments", token, body, params))
-	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "member_required") {
-		t.Fatalf("trigger as the plugin itself status=%d body=%s", recorder.Code, recorder.Body.String())
+	post := func(content string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHandler.CreatePluginComment(recorder, pluginInstallTokenRequest(http.MethodPost, "/v1/issues/"+issueID+"/comments", token,
+			map[string]any{"content": content, "trigger_agents": true}, map[string]string{"issue_ref": issueID}))
+		return recorder
 	}
 
-	var comments int
-	dbfx.QueryRow(t, `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&comments)
-	if comments != 0 || countQueuedCommentTriggerTasks(t, issueID, agentID) != 0 {
-		t.Fatalf("refused triggers left comments=%d queued=%d", comments, countQueuedCommentTriggerTasks(t, issueID, agentID))
+	if recorder := post("preview review is ready"); recorder.Code != http.StatusCreated {
+		t.Fatalf("plugin trigger status=%d body=%s", recorder.Code, recorder.Body.String())
+	} else if !strings.Contains(recorder.Body.String(), `"author_type":"member"`) || !strings.Contains(recorder.Body.String(), testUserID) {
+		t.Fatalf("plugin trigger comment is not authored by the installer: %s", recorder.Body.String())
+	}
+	var originator string
+	dbfx.QueryRow(t, `SELECT originator_user_id::text FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		issueID, agentID).Scan(&originator)
+	if originator != testUserID {
+		t.Fatalf("plugin-triggered task originator = %q, want installer %s", originator, testUserID)
+	}
+
+	dbfx.Exec(t, `UPDATE plugin_installation SET installed_by = gen_random_uuid() WHERE id = $1`, installationID)
+	recorder := post("installer has left")
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "installer_membership_revoked") {
+		t.Fatalf("trigger after installer left status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPluginFindsLinkedPullRequestsByBranch(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read"})
+	first := createTestIssue(t, "Branch lookup first", "todo", "none")
+	second := createTestIssue(t, "Branch lookup second", "todo", "none")
+	other := createTestIssue(t, "Branch lookup other branch", "todo", "none")
+	linkPR := func(number int, branch string, issueIDs ...string) {
+		prID := dbfx.Insert(t, "github_pull_request", testutil.Cols{
+			"workspace_id":    testWorkspaceID,
+			"installation_id": 1,
+			"repo_owner":      "Acme",
+			"repo_name":       "branch-lookup",
+			"pr_number":       number,
+			"title":           fmt.Sprintf("PR %d", number),
+			"state":           "open",
+			"html_url":        fmt.Sprintf("https://github.com/Acme/branch-lookup/pull/%d", number),
+			"branch":          branch,
+			"head_sha":        "abc",
+			"pr_created_at":   testutil.Raw("now()"),
+			"pr_updated_at":   testutil.Raw("now()"),
+		})
+		for _, issueID := range issueIDs {
+			dbfx.InsertNoID(t, "issue_pull_request", testutil.Cols{"issue_id": issueID, "pull_request_id": prID},
+				"pull_request_id = $1", prID)
+		}
+	}
+	linkPR(7, "feat/preview", first, second)
+	linkPR(8, "feat/other", other)
+
+	lookup := func(query string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHandler.ListPluginPullRequestsByBranch(recorder, pluginActionRequest(http.MethodGet, "/v1/pull-requests?"+query, installationID, nil, nil))
+		return recorder
+	}
+
+	recorder := lookup("repo_owner=acme&repo_name=BRANCH-LOOKUP&branch=feat/preview")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("lookup status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var found publicapiv1.LinkedPullRequestListResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode lookup: %v", err)
+	}
+	if len(found.PullRequests) != 1 || found.PullRequests[0].Number != 7 {
+		t.Fatalf("lookup = %+v, want only #7", found.PullRequests)
+	}
+	got := strings.Join(found.PullRequests[0].IssueIDs, ",")
+	if !strings.Contains(got, first) || !strings.Contains(got, second) || len(found.PullRequests[0].IssueIDs) != 2 {
+		t.Fatalf("issue ids = %v, want %s and %s", found.PullRequests[0].IssueIDs, first, second)
+	}
+
+	if recorder := lookup("repo_owner=acme&repo_name=branch-lookup"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("lookup without branch status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
