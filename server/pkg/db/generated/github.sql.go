@@ -596,6 +596,99 @@ func (q *Queries) ListIssueIDsForPullRequest(ctx context.Context, pullRequestID 
 	return items, nil
 }
 
+const listIssueLinksForPullRequestBranch = `-- name: ListIssueLinksForPullRequestBranch :many
+SELECT
+    ipr.issue_id,
+    pr.id, 'github'::text AS provider, pr.repo_owner, pr.repo_name,
+    pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
+FROM github_pull_request pr
+JOIN issue_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id
+WHERE pr.workspace_id = $1
+  AND i.workspace_id = $1
+  AND lower(pr.repo_owner) = lower($2::text)
+  AND lower(pr.repo_name) = lower($3::text)
+  AND pr.branch = $4::text
+UNION ALL
+SELECT
+    ipr.issue_id,
+    pr.id, pr.provider, pr.repo_owner, pr.repo_name,
+    pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.pr_created_at
+FROM vcs_pull_request pr
+JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id
+WHERE pr.workspace_id = $1
+  AND i.workspace_id = $1
+  AND lower(pr.repo_owner) = lower($2::text)
+  AND lower(pr.repo_name) = lower($3::text)
+  AND pr.branch = $4::text
+ORDER BY pr_created_at DESC
+LIMIT 200
+`
+
+type ListIssueLinksForPullRequestBranchParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	RepoOwner   string      `json:"repo_owner"`
+	RepoName    string      `json:"repo_name"`
+	Branch      string      `json:"branch"`
+}
+
+type ListIssueLinksForPullRequestBranchRow struct {
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	ID          pgtype.UUID        `json:"id"`
+	Provider    string             `json:"provider"`
+	RepoOwner   string             `json:"repo_owner"`
+	RepoName    string             `json:"repo_name"`
+	PrNumber    int32              `json:"pr_number"`
+	Title       string             `json:"title"`
+	State       string             `json:"state"`
+	HtmlUrl     string             `json:"html_url"`
+	Branch      pgtype.Text        `json:"branch"`
+	PrCreatedAt pgtype.Timestamptz `json:"pr_created_at"`
+}
+
+// Every issue -> PR link in the workspace whose PR comes from one head branch
+// of one repository, GitHub and self-hosted providers together, newest first.
+// Owner and name compare case-insensitively, as Git hosts treat them. Lets an
+// integration that only knows a branch (a preview deployment, a CI run) find
+// the issues it belongs to.
+func (q *Queries) ListIssueLinksForPullRequestBranch(ctx context.Context, arg ListIssueLinksForPullRequestBranchParams) ([]ListIssueLinksForPullRequestBranchRow, error) {
+	rows, err := q.db.Query(ctx, listIssueLinksForPullRequestBranch,
+		arg.WorkspaceID,
+		arg.RepoOwner,
+		arg.RepoName,
+		arg.Branch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIssueLinksForPullRequestBranchRow{}
+	for rows.Next() {
+		var i ListIssueLinksForPullRequestBranchRow
+		if err := rows.Scan(
+			&i.IssueID,
+			&i.ID,
+			&i.Provider,
+			&i.RepoOwner,
+			&i.RepoName,
+			&i.PrNumber,
+			&i.Title,
+			&i.State,
+			&i.HtmlUrl,
+			&i.Branch,
+			&i.PrCreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listIssuePullRequestSummaries = `-- name: ListIssuePullRequestSummaries :many
 SELECT
     ipr.issue_id,

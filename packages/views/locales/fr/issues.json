@@ -892,6 +892,7 @@
       "source_comment_source": "Depuis un fil de commentaires",
       "source_trigger_owner": "Créateur du déclencheur d'automatisation",
       "source_rule_owner": "Auteur de la règle d'automatisation",
+      "source_plugin_installer": "Installateur du plugin",
       "source_owner_fallback": "Aucun responsable précis — attribué au propriétaire de l'agent",
       "source_backfill": "Attribution reconstituée",
       "source_unattributed": "Aucun membre responsable identifié"

@@ -1269,6 +1269,24 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 // stays squad-leader-only (`no_action`). Retired pins, now negative
 // guards: "do not @mention the other agent as a sign-off", "Silence is
 // the preferred way".
+// A plugin relays people outside the issue, so the prompt names the plugin
+// instead of presenting its text as the user's own.
+func TestBuildPromptCommentTriggeredByPlugin(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID:               "issue-1",
+		TriggerCommentID:      "comment-1",
+		TriggerCommentContent: "Preview review: 2 open comments",
+		TriggerAuthorType:     "plugin",
+		TriggerAuthorName:     "Vercel Preview Review",
+		Agent:                 &AgentData{Name: "Test"},
+	}, "claude")
+	if !strings.Contains(prompt, "The Vercel Preview Review plugin just left a new comment") {
+		t.Fatalf("prompt missing plugin attribution\n---\n%s", prompt)
+	}
+}
+
 func TestBuildPromptCommentTriggeredByAgent(t *testing.T) {
 	t.Parallel()
 

@@ -892,6 +892,7 @@
       "source_comment_source": "From a comment thread",
       "source_trigger_owner": "Autopilot trigger creator",
       "source_rule_owner": "Autopilot rule publisher",
+      "source_plugin_installer": "Plugin installer",
       "source_owner_fallback": "No precise owner — attributed to the agent owner",
       "source_backfill": "Backfilled attribution",
       "source_unattributed": "No responsible member resolved"

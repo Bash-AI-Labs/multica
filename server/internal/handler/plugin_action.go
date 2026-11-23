@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -617,11 +619,14 @@ func publicPluginComment(comment db.Comment) publicapiv1.Comment {
 // The comment is authored BY THE USER and marked with the plugin that produced
 // it, so the timeline can render "Jiayuan (via Hello Panel)".
 //
-// It deliberately does not run the @mention trigger dispatch that the ordinary
+// By default it does not run the @mention trigger dispatch that the ordinary
 // comment endpoint does. A plugin that could post a mention could start agent
 // runs — and spend the workspace's budget — from a surface the user only meant
-// to click a button in. Plugins that want to start work will get an explicit
-// hook for it rather than inheriting it as a side effect of posting text.
+// to click a button in. Starting work is the explicit `trigger_agents` opt-in
+// instead: it needs the tasks:write grant the admin saw on the consent screen,
+// and runs under a member's own invoke permissions (see pluginTriggerMember).
+// The comment keeps its usual author either way; only the runs borrow the
+// member's authority.
 func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeCommentsWrite)
 	if !ok {
@@ -645,6 +650,17 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	if len(content) > maxCommentContentBytes {
 		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "content is too long")
 		return
+	}
+	// The member whose invoke permissions the triggered runs use.
+	var triggerMember db.Member
+	if req.TriggerAgents {
+		if !hasGrantedScope(caller.Scopes, plugincontract.ScopeTasksWrite) {
+			publicapiv1.WriteProblem(w, r, http.StatusForbidden, "missing_scope", "this Plugin was not granted the "+plugincontract.ScopeTasksWrite+" scope")
+			return
+		}
+		if triggerMember, ok = h.pluginTriggerMember(w, r, caller, actor); !ok {
+			return
+		}
 	}
 
 	var parentID pgtype.UUID
@@ -708,8 +724,156 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	if rootComment != nil {
 		h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(caller.WorkspaceID), authorType, uuidToString(authorID), pgtype.UUID{})
 	}
+	if req.TriggerAgents {
+		// A plugin-authored trigger resolves its runs to the installer through
+		// the comment (attribution.SourcePluginInstaller); the originator passed
+		// here is that same member, for the invoke-permission checks.
+		h.triggerTasksForComment(r.Context(), issue, comment, rootComment, authorType, uuidToString(authorID), uuidToString(triggerMember.UserID), nil, commentSteerRequest{})
+	}
 
 	writeJSON(w, http.StatusCreated, publicPluginComment(comment))
+}
+
+// pluginTriggerMember is the person whose invoke permissions a trigger_agents
+// comment runs under: the member behind the call, or — when the Plugin acts as
+// itself, from a schedule or its own poller — the member who installed it and
+// granted tasks:write, the way an autopilot runs as its creator. The comment
+// itself stays the Plugin's: the installer lends authority, not their name.
+// Membership is re-checked so a departed installer stops lending it.
+func (h *Handler) pluginTriggerMember(w http.ResponseWriter, r *http.Request, caller service.PluginActionCaller, actor pluginActor) (db.Member, bool) {
+	if actor.isMember() {
+		return actor.Member, true
+	}
+	installer := caller.Installation.InstalledBy
+	if installer.Valid {
+		if member, err := h.getWorkspaceMember(r.Context(), uuidToString(installer), uuidToString(caller.WorkspaceID)); err == nil {
+			return member, true
+		}
+	}
+	publicapiv1.WriteProblem(w, r, http.StatusForbidden, "installer_membership_revoked", "the member who installed this Plugin is no longer in the workspace; reinstall it to let it wake agents")
+	return db.Member{}, false
+}
+
+// pluginAuthorName is the consented manifest name of the Plugin that wrote a
+// plugin-authored comment, or "" when the installation is gone.
+func (h *Handler) pluginAuthorName(ctx context.Context, comment db.Comment) string {
+	installation, err := h.Queries.GetWorkspacePluginInstallation(ctx, db.GetWorkspacePluginInstallationParams{
+		WorkspaceID: comment.WorkspaceID,
+		ID:          comment.AuthorID,
+	})
+	if err != nil {
+		return ""
+	}
+	manifest, err := service.ParseInstallationManifest(installation)
+	if err != nil {
+		return ""
+	}
+	return manifest.Name
+}
+
+// ListPluginPullRequestsByBranch — GET /v1/pull-requests
+func (h *Handler) ListPluginPullRequestsByBranch(w http.ResponseWriter, r *http.Request) {
+	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	params := db.ListIssueLinksForPullRequestBranchParams{
+		WorkspaceID: caller.WorkspaceID,
+		RepoOwner:   strings.TrimSpace(query.Get("repo_owner")),
+		RepoName:    strings.TrimSpace(query.Get("repo_name")),
+		Branch:      query.Get("branch"),
+	}
+	if params.RepoOwner == "" || params.RepoName == "" || params.Branch == "" {
+		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "repo_owner, repo_name and branch are required")
+		return
+	}
+	rows, err := h.Queries.ListIssueLinksForPullRequestBranch(r.Context(), params)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+
+	payload := make([]publicapiv1.LinkedPullRequest, 0, len(rows))
+	index := map[string]int{}
+	for _, row := range rows {
+		if caller.IssueScope.Valid && uuidToString(row.IssueID) != uuidToString(caller.IssueScope) {
+			continue
+		}
+		id := uuidToString(row.ID)
+		at, seen := index[id]
+		if !seen {
+			at = len(payload)
+			index[id] = at
+			payload = append(payload, publicapiv1.LinkedPullRequest{
+				PullRequest: publicapiv1.PullRequest{
+					ID:        id,
+					Provider:  row.Provider,
+					RepoOwner: row.RepoOwner,
+					RepoName:  row.RepoName,
+					Number:    row.PrNumber,
+					Title:     row.Title,
+					State:     row.State,
+					HTMLURL:   row.HtmlUrl,
+					Branch:    textToPtr(row.Branch),
+					CreatedAt: timestampToString(row.PrCreatedAt),
+				},
+				IssueIDs: []string{},
+			})
+		}
+		payload[at].IssueIDs = append(payload[at].IssueIDs, uuidToString(row.IssueID))
+	}
+	writeJSON(w, http.StatusOK, publicapiv1.LinkedPullRequestListResponse{PullRequests: payload})
+}
+
+// ListPluginPullRequests — GET /v1/issues/{issue_ref}/pull-requests
+//
+// Every provider's links, newest first, without the CI / merge snapshot the
+// issue page renders.
+func (h *Handler) ListPluginPullRequests(w http.ResponseWriter, r *http.Request) {
+	caller, _, ok := h.pluginCaller(w, r, plugincontract.ScopeIssuesRead)
+	if !ok {
+		return
+	}
+	issue, ok := h.pluginIssueForUser(w, r, caller, chi.URLParam(r, "issue_ref"))
+	if !ok {
+		return
+	}
+	githubRows, err := h.Queries.ListPullRequestsByIssue(r.Context(), issue.ID)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+	vcsRows, err := h.Queries.ListVCSPullRequestsByIssue(r.Context(), issue.ID)
+	if err != nil {
+		publicapiv1.WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "failed to list pull requests")
+		return
+	}
+	linked := make([]GitHubPullRequestResponse, 0, len(githubRows)+len(vcsRows))
+	for _, row := range githubRows {
+		linked = append(linked, issuePullRequestRowToResponse(row, false))
+	}
+	for _, row := range vcsRows {
+		linked = append(linked, vcsPullRequestRowToResponse(row))
+	}
+	sort.SliceStable(linked, func(i, j int) bool { return linked[i].PRCreatedAt > linked[j].PRCreatedAt })
+
+	payload := make([]publicapiv1.PullRequest, 0, len(linked))
+	for _, pr := range linked {
+		payload = append(payload, publicapiv1.PullRequest{
+			ID:        pr.ID,
+			Provider:  pr.Provider,
+			RepoOwner: pr.RepoOwner,
+			RepoName:  pr.RepoName,
+			Number:    pr.Number,
+			Title:     pr.Title,
+			State:     pr.State,
+			HTMLURL:   pr.HtmlURL,
+			Branch:    pr.Branch,
+			CreatedAt: pr.PRCreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, publicapiv1.PullRequestListResponse{PullRequests: payload})
 }
 
 // maxPluginCommentsPerRead bounds one read. The query returns the NEWEST N in

@@ -859,6 +859,7 @@
       "source_comment_source": "來自評論執行緒",
       "source_trigger_owner": "自動化觸發器建立者",
       "source_rule_owner": "自動化規則釋出者",
+      "source_plugin_installer": "外掛安裝者",
       "source_owner_fallback": "無精確責任人——歸到 AI 代理所有者",
       "source_backfill": "回填的歸因",
       "source_unattributed": "未解析到責任成員"

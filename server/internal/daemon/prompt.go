@@ -509,6 +509,13 @@ func buildCommentPrompt(task Task, provider string) string {
 				name = "another agent"
 			}
 			authorLabel = fmt.Sprintf("Another agent (%s)", name)
+		} else if task.TriggerAuthorType == "plugin" {
+			// Plugin text relays someone outside this conversation (a review
+			// tool, a CI system); say so instead of passing it off as a user.
+			authorLabel = "A plugin"
+			if task.TriggerAuthorName != "" {
+				authorLabel = fmt.Sprintf("The %s plugin", task.TriggerAuthorName)
+			}
 		}
 		// MUL-8218: an edited trigger on a resumed session. The edit cancelled
 		// the run that read the old text and retriggered from the new one, but

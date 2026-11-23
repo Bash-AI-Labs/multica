@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	publicapiv1 "github.com/multica-ai/multica/server/pkg/publicapi/v1"
 )
 
@@ -382,6 +383,200 @@ func TestPluginCommentIsAuthoredByTheUserAndMarkedWithThePlugin(t *testing.T) {
 	}
 	if viaPlugin == nil || *viaPlugin != installationID {
 		t.Fatalf("via_plugin_id = %v, want %s", viaPlugin, installationID)
+	}
+}
+
+func TestPluginCommentTriggerAgentsWakesTheAssignee(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
+	agentID := createHandlerTestAgent(t, "Plugin Review Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin review wakes the assignee", "agent", agentID)
+
+	post := func(body map[string]any) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID,
+			body, map[string]string{"issue_ref": issueID}))
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("create comment status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	post(map[string]any{"content": "plain plugin comment"})
+	if got := countQueuedCommentTriggerTasks(t, issueID, agentID); got != 0 {
+		t.Fatalf("comment without trigger_agents queued %d tasks, want 0", got)
+	}
+	post(map[string]any{"content": "preview review is ready", "trigger_agents": true})
+	if got := countQueuedCommentTriggerTasks(t, issueID, agentID); got != 1 {
+		t.Fatalf("trigger_agents queued %d tasks, want 1", got)
+	}
+}
+
+func TestPluginCommentTriggerAgentsNeedsTasksWrite(t *testing.T) {
+	agentID := createHandlerTestAgent(t, "Plugin Refused Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger refusal", "agent", agentID)
+
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write"})
+	recorder := httptest.NewRecorder()
+	testHandler.CreatePluginComment(recorder, pluginActionRequest(http.MethodPost, "/comments", installationID,
+		map[string]any{"content": "wake up", "trigger_agents": true}, map[string]string{"issue_ref": issueID}))
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "tasks:write") {
+		t.Fatalf("trigger without tasks:write status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var comments int
+	dbfx.QueryRow(t, `SELECT count(*) FROM comment WHERE issue_id = $1`, issueID).Scan(&comments)
+	if comments != 0 || countQueuedCommentTriggerTasks(t, issueID, agentID) != 0 {
+		t.Fatalf("refused trigger left comments=%d queued=%d", comments, countQueuedCommentTriggerTasks(t, issueID, agentID))
+	}
+}
+
+// A Plugin acting as itself keeps its own name on the comment and lends only
+// the installer's authority to the run it starts.
+func TestPluginOwnTriggerRunsForTheInstaller(t *testing.T) {
+	agentID := createHandlerTestAgent(t, "Plugin Installer Assignee", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger as installer", "agent", agentID)
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write", "tasks:write"})
+	token, err := testHandler.PluginService.IssueInstallToken(context.Background(), parseUUID(installationID))
+	if err != nil {
+		t.Fatalf("issue install token: %v", err)
+	}
+	post := func(content string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHandler.CreatePluginComment(recorder, pluginInstallTokenRequest(http.MethodPost, "/v1/issues/"+issueID+"/comments", token,
+			map[string]any{"content": content, "trigger_agents": true}, map[string]string{"issue_ref": issueID}))
+		return recorder
+	}
+
+	recorder := post("preview review is ready")
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("plugin trigger status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var comment struct {
+		ID         string `json:"id"`
+		AuthorType string `json:"author_type"`
+		AuthorID   string `json:"author_id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &comment); err != nil {
+		t.Fatalf("decode comment: %v", err)
+	}
+	if comment.AuthorType != "plugin" || comment.AuthorID != installationID {
+		t.Fatalf("plugin trigger comment author = %s %s, want the plugin %s", comment.AuthorType, comment.AuthorID, installationID)
+	}
+	var originator, accountable, source, triggerComment string
+	dbfx.QueryRow(t, `SELECT originator_user_id::text, accountable_user_id::text, originator_source, trigger_comment_id::text
+		FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		issueID, agentID).Scan(&originator, &accountable, &source, &triggerComment)
+	if originator != testUserID || accountable != testUserID || source != "plugin_installer" || triggerComment != comment.ID {
+		t.Fatalf("plugin-triggered task originator=%q accountable=%q source=%q trigger=%q, want installer %s via plugin_installer from %s",
+			originator, accountable, source, triggerComment, testUserID, comment.ID)
+	}
+
+	dbfx.Exec(t, `UPDATE plugin_installation SET installed_by = gen_random_uuid() WHERE id = $1`, installationID)
+	recorder = post("installer has left")
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "installer_membership_revoked") {
+		t.Fatalf("trigger after installer left status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPluginFindsLinkedPullRequestsByBranch(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read"})
+	first := createTestIssue(t, "Branch lookup first", "todo", "none")
+	second := createTestIssue(t, "Branch lookup second", "todo", "none")
+	other := createTestIssue(t, "Branch lookup other branch", "todo", "none")
+	linkPR := func(number int, branch string, issueIDs ...string) {
+		prID := dbfx.Insert(t, "github_pull_request", testutil.Cols{
+			"workspace_id":    testWorkspaceID,
+			"installation_id": 1,
+			"repo_owner":      "Acme",
+			"repo_name":       "branch-lookup",
+			"pr_number":       number,
+			"title":           fmt.Sprintf("PR %d", number),
+			"state":           "open",
+			"html_url":        fmt.Sprintf("https://github.com/Acme/branch-lookup/pull/%d", number),
+			"branch":          branch,
+			"head_sha":        "abc",
+			"pr_created_at":   testutil.Raw("now()"),
+			"pr_updated_at":   testutil.Raw("now()"),
+		})
+		for _, issueID := range issueIDs {
+			dbfx.InsertNoID(t, "issue_pull_request", testutil.Cols{"issue_id": issueID, "pull_request_id": prID},
+				"pull_request_id = $1", prID)
+		}
+	}
+	linkPR(7, "feat/preview", first, second)
+	linkPR(8, "feat/other", other)
+
+	lookup := func(query string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHandler.ListPluginPullRequestsByBranch(recorder, pluginActionRequest(http.MethodGet, "/v1/pull-requests?"+query, installationID, nil, nil))
+		return recorder
+	}
+
+	recorder := lookup("repo_owner=acme&repo_name=BRANCH-LOOKUP&branch=feat/preview")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("lookup status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var found publicapiv1.LinkedPullRequestListResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode lookup: %v", err)
+	}
+	if len(found.PullRequests) != 1 || found.PullRequests[0].Number != 7 {
+		t.Fatalf("lookup = %+v, want only #7", found.PullRequests)
+	}
+	got := strings.Join(found.PullRequests[0].IssueIDs, ",")
+	if !strings.Contains(got, first) || !strings.Contains(got, second) || len(found.PullRequests[0].IssueIDs) != 2 {
+		t.Fatalf("issue ids = %v, want %s and %s", found.PullRequests[0].IssueIDs, first, second)
+	}
+
+	if recorder := lookup("repo_owner=acme&repo_name=branch-lookup"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("lookup without branch status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPluginListsLinkedPullRequestsNewestFirst(t *testing.T) {
+	installationID := installPluginForAction(t, []string{"issues:read"})
+	issueID := createTestIssue(t, "Plugin pull request list", "todo", "none")
+	linkPR := func(number int, state, branch, createdAt string) {
+		prID := dbfx.Insert(t, "github_pull_request", testutil.Cols{
+			"workspace_id":    testWorkspaceID,
+			"installation_id": 1,
+			"repo_owner":      "acme",
+			"repo_name":       "plugin-pr-list",
+			"pr_number":       number,
+			"title":           fmt.Sprintf("PR %d", number),
+			"state":           state,
+			"html_url":        fmt.Sprintf("https://github.com/acme/plugin-pr-list/pull/%d", number),
+			"branch":          branch,
+			"head_sha":        "abc",
+			"pr_created_at":   testutil.Raw(createdAt),
+			"pr_updated_at":   testutil.Raw("now()"),
+		})
+		dbfx.InsertNoID(t, "issue_pull_request", testutil.Cols{"issue_id": issueID, "pull_request_id": prID},
+			"pull_request_id = $1", prID)
+	}
+	linkPR(41, "merged", "feat/older", "now() - interval '1 day'")
+	linkPR(42, "open", "feat/preview", "now()")
+
+	recorder := httptest.NewRecorder()
+	testHandler.ListPluginPullRequests(recorder, pluginActionRequest(http.MethodGet, "/pull-requests", installationID, nil,
+		map[string]string{"issue_ref": issueID}))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list pull requests status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var listed publicapiv1.PullRequestListResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode pull requests: %v", err)
+	}
+	if len(listed.PullRequests) != 2 {
+		t.Fatalf("pull requests = %+v, want 2", listed.PullRequests)
+	}
+	newest := listed.PullRequests[0]
+	if newest.Number != 42 || newest.State != "open" || newest.Provider != "github" ||
+		newest.Branch == nil || *newest.Branch != "feat/preview" ||
+		newest.HTMLURL != "https://github.com/acme/plugin-pr-list/pull/42" {
+		t.Fatalf("newest pull request = %+v", newest)
+	}
+	if listed.PullRequests[1].Number != 41 {
+		t.Fatalf("second pull request = %+v, want #41", listed.PullRequests[1])
 	}
 }
 

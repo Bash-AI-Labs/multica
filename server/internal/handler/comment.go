@@ -2711,6 +2711,17 @@ func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issu
 		return nil, nil
 	}
 
+	if actorType == "plugin" && opts.OriginatorUserID != "" {
+		// A Plugin comment only reaches the trigger path through an explicit
+		// trigger_agents request, made with its installer's authority. It is a
+		// new request, not a reply in a member conversation, so it goes to the
+		// issue's assignee.
+		if trigger, ok := h.routeAssigneeFallback(ctx, issue, actorType, actorID, opts); ok {
+			return []commentAgentTrigger{trigger}, nil
+		}
+		return nil, nil
+	}
+
 	if actorType != "member" {
 		// Agent-authored comments do not participate in the member-driven
 		// conversation routing (parent-author / thread-root continuation) or

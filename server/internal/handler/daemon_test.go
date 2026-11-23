@@ -4587,6 +4587,33 @@ func TestClaimTaskByRuntime_CommentAuthorDiffersFromOriginator(t *testing.T) {
 	}
 }
 
+// A plugin-authored trigger reaches the agent under the plugin's own name, so
+// the prompt can say who is relaying the text.
+func TestClaimTaskByRuntime_PluginTriggerNamesThePlugin(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	installationID := installPluginForAction(t, []string{"issues:read", "comments:write", "storage:user"})
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Plugin trigger runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Plugin trigger agent")
+	commentID := dbfx.Comment(t, issueID, "Preview review: 1 comment", testutil.Cols{
+		"author_type": "plugin",
+		"author_id":   installationID,
+	})
+	dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "issue_id": issueID, "trigger_comment_id": commentID})
+
+	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil)
+	req = withURLParam(req, "runtimeId", runtimeID)
+	var resp struct {
+		Task *AgentTaskResponse `json:"task"`
+	}
+	testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(http.StatusOK).JSON(&resp)
+	if resp.Task == nil || resp.Task.TriggerAuthorType != "plugin" || resp.Task.TriggerAuthorName != "Hello Panel" {
+		t.Fatalf("plugin trigger author = %+v, want plugin Hello Panel", resp.Task)
+	}
+}
+
 func TestClaimTaskByRuntime_CommentWithoutOriginatorOmitsOnBehalfOf(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")

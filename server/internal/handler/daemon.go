@@ -3405,6 +3405,8 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 							resp.TriggerAuthorName = u.Name
 						}
 					}
+				case "plugin":
+					resp.TriggerAuthorName = h.pluginAuthorName(r.Context(), comment)
 				}
 				// Count comments that arrived issue-wide since this agent's last
 				// run, so the daemon can tell it the full catch-up volume up front
@@ -5327,6 +5329,8 @@ func (h *Handler) buildCoalescedCommentData(ctx context.Context, workspaceID pgt
 				if u, err := h.Queries.GetUser(ctx, comment.AuthorID); err == nil {
 					data.AuthorName = u.Name
 				}
+			case "plugin":
+				data.AuthorName = h.pluginAuthorName(ctx, comment)
 			}
 		}
 		out = append(out, data)

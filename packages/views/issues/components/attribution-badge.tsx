@@ -82,6 +82,9 @@ export function AttributionBadge({
     case "rule_owner":
       sourceLabel = t(($) => $.execution_log.attribution.source_rule_owner);
       break;
+    case "plugin_installer":
+      sourceLabel = t(($) => $.execution_log.attribution.source_plugin_installer);
+      break;
     case "owner_fallback":
       sourceLabel = t(($) => $.execution_log.attribution.source_owner_fallback);
       break;

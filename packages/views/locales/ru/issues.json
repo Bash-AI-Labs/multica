@@ -955,6 +955,7 @@
       "source_comment_source": "Из треда комментариев",
       "source_trigger_owner": "Создатель триггера автопилота",
       "source_rule_owner": "Автор правила автопилота",
+      "source_plugin_installer": "Установивший плагин",
       "source_owner_fallback": "Точный владелец не определён — приписано владельцу агента",
       "source_backfill": "Атрибуция восстановлена задним числом",
       "source_unattributed": "Ответственный участник не определён"

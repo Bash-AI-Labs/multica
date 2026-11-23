@@ -85,6 +85,37 @@ type CommentListResponse struct {
 type CreateCommentRequest struct {
 	Content  string  `json:"content"`
 	ParentID *string `json:"parent_id,omitempty"`
+	// TriggerAgents wakes the mentioned agents, otherwise the agent assignee.
+	// It needs the tasks:write grant. A call acting as the Plugin itself keeps
+	// the Plugin as the author and runs the triggers with the permissions of
+	// the member who installed it.
+	TriggerAgents bool `json:"trigger_agents,omitempty"`
+}
+
+type PullRequest struct {
+	ID        string  `json:"id"`
+	Provider  string  `json:"provider"`
+	RepoOwner string  `json:"repo_owner"`
+	RepoName  string  `json:"repo_name"`
+	Number    int32   `json:"number"`
+	Title     string  `json:"title"`
+	State     string  `json:"state"`
+	HTMLURL   string  `json:"html_url"`
+	Branch    *string `json:"branch"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type PullRequestListResponse struct {
+	PullRequests []PullRequest `json:"pull_requests"`
+}
+
+type LinkedPullRequest struct {
+	PullRequest
+	IssueIDs []string `json:"issue_ids"`
+}
+
+type LinkedPullRequestListResponse struct {
+	PullRequests []LinkedPullRequest `json:"pull_requests"`
 }
 
 type StorageKey struct {
