@@ -1,4 +1,4 @@
-// Run: node --test examples/plugins/vercel-preview-review/server/
+// Run: node --test examples/plugins/vercel-preview-review/server/review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classify, record, renderReview, MAX_COMMENT_CHARS } from "./review.mjs";
@@ -31,13 +31,17 @@ test("each issue gets a message once, then only what is new", () => {
   const first = thread("t1", [message("m1", "Ama", "CTA overlaps the footer")]);
   assert.deepEqual([...classify(first, { sent: {} }, "issue-1").fresh], ["m1"]);
 
-  const ledger = record({ sent: {} }, "issue-1", first);
+  const ledger = record({ sent: {} }, "issue-1", first, "comment-1");
   assert.equal(classify(first, ledger, "issue-1"), null);
-  assert.ok(classify(first, ledger, "issue-2"), "another linked issue still needs it");
+  const other = classify(first, ledger, "issue-2");
+  assert.ok(other && !other.parent, "another linked issue still needs it, in a new conversation");
 
   const replied = thread("t1", [...first.messages, message("m2", "Kofi", "still broken at 768px", 2)]);
   const plan = classify(replied, ledger, "issue-1");
-  assert.deepEqual({ fresh: [...plan.fresh], followUp: plan.followUp, reopened: plan.reopened }, { fresh: ["m2"], followUp: true, reopened: false });
+  assert.deepEqual(
+    { fresh: [...plan.fresh], followUp: plan.followUp, reopened: plan.reopened, parent: plan.parent },
+    { fresh: ["m2"], followUp: true, reopened: false, parent: "comment-1" },
+  );
 
   const content = render([{ pr, thread: replied, ...plan }]);
   assert.match(content, /Follow-up: Kofi on \/pricing/);
@@ -47,25 +51,29 @@ test("each issue gets a message once, then only what is new", () => {
 
 test("a reopened thread goes back to every linked issue, labelled", () => {
   const t = thread("t1", [message("m1", "Ama", "CTA overlaps the footer")]);
-  let ledger = record(record({ sent: {} }, "issue-1", t), "issue-2", t);
+  let ledger = record(record({ sent: {} }, "issue-1", t, "comment-1"), "issue-2", t, "comment-2");
   ledger = { ...ledger, closedAt: 1 };
 
   const plan = classify(t, ledger, "issue-1");
-  assert.equal(plan.reopened, true);
+  assert.deepEqual({ reopened: plan.reopened, parent: plan.parent }, { reopened: true, parent: "comment-1" });
   assert.match(render([{ pr, thread: t, ...plan }]), /Reopened: Ama on \/pricing/);
 
-  ledger = record(ledger, "issue-1", t);
+  ledger = record(ledger, "issue-1", t, "comment-1");
   assert.equal(classify(t, ledger, "issue-1"), null);
-  assert.equal(classify(t, ledger, "issue-2").reopened, true);
+  assert.deepEqual(
+    { reopened: classify(t, ledger, "issue-2").reopened, parent: classify(t, ledger, "issue-2").parent },
+    { reopened: true, parent: "comment-2" },
+  );
+  assert.equal(classify(t, ledger, "issue-3").reopened, false, "an issue linked later gets it as new");
 });
 
 test("agents are told to resolve, never to reply on Vercel", () => {
   const t = thread("t1;rm -rf", [message("m1", "Ama", "fix spacing")]);
   const content = render([{ pr, thread: t, ...classify(t, { sent: {} }, "issue-1") }]);
-  assert.match(content, /`vercel comments resolve t1rm-rf --project prj_1 --scope team_1 --yes`/);
+  assert.match(content, /```sh\nvercel comments resolve t1rm-rf --project prj_1 --scope team_1 --yes\n```/);
   assert.doesNotMatch(content, /--message/);
   assert.match(content, /Do not reply on Vercel/);
-  assert.match(content, /\*\*Preview review\*\* from Ama: 1 comment on \[bashpos#1181\]/);
+  assert.match(content, /^Preview review from Ama: 1 comment\.\n\nOn \[bashpos#1181\]/);
 });
 
 test("a review larger than one comment sends the rest next time", () => {

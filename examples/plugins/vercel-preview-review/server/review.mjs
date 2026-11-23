@@ -9,25 +9,35 @@ const messageIds = (thread) => (thread.messages ?? []).map((message) => message.
 
 // --- What each issue has received ---
 //
-// One record per Vercel thread: { sent: { issueId: [messageId] }, closedAt?,
-// reopened? }. closedAt is set once the thread leaves the open list; seeing the
-// thread open again means a reviewer reopened it.
+// One record per Vercel thread:
+//
+//   { sent: { issueId: { messages: [messageId], comment: rootCommentId } },
+//     closedAt?, reopened? }
+//
+// comment is the Multica conversation the thread started on that issue;
+// follow-ups and reopens reply there. closedAt is set once the thread leaves
+// the open list; seeing it open again means a reviewer reopened it.
 
 // What issueId still needs from thread, or null when it has every message.
+// parent is the conversation to reply in, if the thread already has one.
 export function classify(thread, ledger, issueId) {
-  const sent = ledger.sent ?? {};
-  const reopened = Boolean(ledger.closedAt) || (Boolean(ledger.reopened) && !sent[issueId]);
-  const received = new Set(ledger.closedAt ? [] : (sent[issueId] ?? []));
+  const entry = ledger.sent?.[issueId];
+  const received = new Set(ledger.closedAt ? [] : (entry?.messages ?? []));
   const fresh = new Set(messageIds(thread).filter((id) => !received.has(id)));
   if (!fresh.size) return null;
-  return { fresh, reopened, followUp: !reopened && received.size > 0 };
+  const reopened = Boolean(ledger.closedAt) || (Boolean(ledger.reopened) && Boolean(entry) && received.size === 0);
+  return { fresh, reopened, followUp: !reopened && received.size > 0, parent: entry?.comment };
 }
 
-// The record after issueId received every current message of thread. A
-// reopened thread starts a new round, so every linked issue gets it again.
-export function record(ledger, issueId, thread) {
-  const sent = ledger.closedAt ? {} : { ...ledger.sent };
-  sent[issueId] = messageIds(thread);
+// The record after issueId received every current message of thread in the
+// conversation rooted at commentId. A reopened thread starts a new round, so
+// every issue that had it gets it again.
+export function record(ledger, issueId, thread, commentId) {
+  const sent = {};
+  for (const [id, entry] of Object.entries(ledger.sent ?? {})) {
+    sent[id] = ledger.closedAt ? { ...entry, messages: [] } : entry;
+  }
+  sent[issueId] = { messages: messageIds(thread), comment: commentId };
   return ledger.closedAt || ledger.reopened ? { sent, reopened: true } : { sent };
 }
 
@@ -73,7 +83,8 @@ function images(message) {
 
 function renderMessage(message) {
   const text = message.text?.trim() ? quote(message.text) : "> (screenshot only)";
-  return [`**${reviewer(message)}:**`, text, ...images(message)].join("\n");
+  // A blank line keeps screenshots out of the quote.
+  return [`**${reviewer(message)}:**\n${text}`, ...images(message)].join("\n\n");
 }
 
 // One thread as the agent needs it. A follow-up shows the original comment for
@@ -102,11 +113,16 @@ function renderThread({ thread, fresh, reopened, followUp }, index, teamId) {
   lines.push(`- **Page:** ${page}${viewport}`);
   if (context.selector) lines.push(`- **Element:** \`${String(context.selector).replace(/`/g, "'").slice(0, 300)}\``);
   const threadURL = httpsURL(thread.webUrl);
-  lines.push(`- **Vercel thread:** ${threadURL ? `[\`${token(thread.id)}\`](${threadURL})` : `\`${token(thread.id)}\``}`);
-  lines.push(
-    `- **Resolve when done:** \`vercel comments resolve ${token(thread.id)} --project ${token(thread.projectId)} --scope ${token(teamId)} --yes\``,
-  );
+  lines.push(`- **Vercel thread:** ${threadURL ? `[${token(thread.id)}](${threadURL})` : token(thread.id)}`);
   if (context.frameworkContext) lines.push("", "```text", ...componentPath(context.frameworkContext), "```");
+  lines.push(
+    "",
+    "Resolve when done:",
+    "",
+    "```sh",
+    `vercel comments resolve ${token(thread.id)} --project ${token(thread.projectId)} --scope ${token(teamId)} --yes`,
+    "```",
+  );
   return lines.join("\n").trimEnd();
 }
 
@@ -122,18 +138,20 @@ export function renderReview(items, { teamId }) {
       ordered.flatMap(({ thread, fresh }) => (thread.messages ?? []).filter((m) => fresh.has(m.id)).map(reviewer)),
     ),
   ];
+  // The first line stays plain text: run lists and notifications show it as
+  // the trigger summary.
   const header = [
-    `**Preview review** from ${joinNames(reviewers)}: ${ordered.length} comment${ordered.length === 1 ? "" : "s"} on ` +
+    `Preview review from ${joinNames(reviewers)}: ${ordered.length} comment${ordered.length === 1 ? "" : "s"}.`,
+    "",
+    "On " +
       prs
         .map((pr) => {
           const link = `${inline(pr.repo_name)}#${token(pr.number)}`;
           return `${httpsURL(pr.html_url) ? `[${link}](${pr.html_url})` : link} (\`${inline(pr.branch)}\`)`;
         })
         .join(", ") +
-      ".",
-    "",
-    "Make each change in its pull request and post your updates here, on this issue. " +
-      "Do not reply on Vercel. Once an item is done and pushed, resolve its Vercel thread with the command listed under it.",
+      ". Make each change in its pull request and post your updates here, on this issue. " +
+      "Do not reply on Vercel. Once an item is done and pushed, resolve its Vercel thread with the command under it.",
   ].join("\n");
 
   let content = header;

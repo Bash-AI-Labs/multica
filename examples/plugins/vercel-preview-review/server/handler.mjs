@@ -126,11 +126,7 @@ async function multica(auth, method, path, payload) {
 
 const isActive = (pr) => pr.branch && (pr.state === "open" || pr.state === "draft");
 
-// --- What each issue has received ---
-//
-// One storage value per Vercel thread: { sent: { issueId: [messageId] },
-// closedAt?, reopened? }. closedAt is set once the thread leaves the open list;
-// seeing it open again means a reviewer reopened it.
+// --- What each issue has received (record format: review.mjs) ---
 
 const ledgerPath = (threadId) => `/storage/workspace/${LEDGER_PREFIX}${encodeURIComponent(threadId)}`;
 
@@ -201,31 +197,55 @@ function exclusive(task) {
 }
 
 // Posts the threads with messages the issue has not received; null when there
-// are none.
+// are none. New threads start a conversation on the issue; a follow-up or a
+// reopen replies in the conversation its thread started, so a run that has not
+// begun yet takes it in.
 function sendReview(auth, issueId, candidates) {
   return exclusive(async () => {
-    const items = [];
+    const groups = new Map();
     for (const { pr, thread } of candidates) {
       const ledger = await readLedger(auth, thread.id);
       const plan = classify(thread, ledger, issueId);
-      if (plan) items.push({ pr, thread, ledger, ...plan });
+      if (!plan) continue;
+      const key = plan.parent ?? "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ pr, thread, ledger, ...plan });
     }
-    if (!items.length) return null;
+    if (!groups.size) return null;
 
-    const review = renderReview(items, { teamId: VERCEL_TEAM_ID });
-    const comment = await multica(auth, "POST", `/issues/${encodeURIComponent(issueId)}/comments`, {
-      content: review.content,
-      trigger_agents: true,
-    });
-    for (const { thread, ledger } of review.sent) {
-      try {
-        await writeLedger(auth, thread.id, record(ledger, issueId, thread));
-      } catch (error) {
-        console.error(`thread ${thread.id}: sent to issue ${issueId} but not recorded: ${error.message}`);
+    const result = { comment_ids: [], threads: [], remaining: 0 };
+    for (const [parent, items] of groups) {
+      const review = renderReview(items, { teamId: VERCEL_TEAM_ID });
+      const { comment, root } = await postReview(auth, issueId, review.content, parent);
+      for (const { thread, ledger } of review.sent) {
+        try {
+          await writeLedger(auth, thread.id, record(ledger, issueId, thread, root));
+        } catch (error) {
+          console.error(`thread ${thread.id}: sent to issue ${issueId} but not recorded: ${error.message}`);
+        }
       }
+      result.comment_ids.push(comment.id);
+      result.threads.push(...review.sent.map(({ thread }) => thread.id));
+      result.remaining += review.remaining;
     }
-    return { comment_id: comment.id, threads: review.sent.map(({ thread }) => thread.id), remaining: review.remaining };
+    return result;
   });
+}
+
+async function postReview(auth, issueId, content, parent) {
+  const path = `/issues/${encodeURIComponent(issueId)}/comments`;
+  if (parent) {
+    try {
+      const comment = await multica(auth, "POST", path, { content, parent_id: parent, trigger_agents: true });
+      return { comment, root: parent };
+    } catch (error) {
+      // A refused reply posted nothing. When its conversation was deleted the
+      // review starts a new one; anything else is a real failure.
+      if (!(error instanceof UpstreamError) || ![400, 404].includes(error.status)) throw error;
+    }
+  }
+  const comment = await multica(auth, "POST", path, { content, trigger_agents: true });
+  return { comment, root: comment.id };
 }
 
 // --- The issue action ---

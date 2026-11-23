@@ -17,13 +17,17 @@ issue on its own.
    That needs Vercel CLI 66 or newer, signed in to the team, on the daemon
    machine.
 
-Reviewers keep the conversation on Vercel:
+Reviewers keep the conversation on Vercel, and each Vercel thread keeps one
+conversation on the issue:
 
-- A reply to an open thread goes back to the agent as a follow-up, showing the
-  original comment and only the new replies.
-- Reopening a resolved thread sends it back marked as reopened, so the agent
-  knows the earlier change did not settle it.
-- New comments start a new review.
+- New comments start a new review conversation.
+- A reply to an open thread goes back as a follow-up in the conversation that
+  thread started, showing the original comment and only the new replies.
+- Reopening a resolved thread sends it back there marked as reopened, so the
+  agent knows the earlier change did not settle it.
+
+A follow-up that arrives before the agent has started joins the run that is
+already waiting instead of queueing another one.
 
 To send without waiting, pick **Send preview review to agent** from the issue
 actions menu.
@@ -119,7 +123,7 @@ the plugin has left the workspace; reinstall it.
 ## Tests
 
 ```bash
-node --test examples/plugins/vercel-preview-review/server/
+node --test examples/plugins/vercel-preview-review/server/review.test.mjs
 ```
 
 ## Scopes
