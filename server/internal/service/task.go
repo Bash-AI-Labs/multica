@@ -487,6 +487,16 @@ func (s *TaskService) attributionFromComment(ctx context.Context, comment db.Com
 			facts.ParentAccountable = parent.AccountableUserID
 		}
 	}
+	// A plugin-authored comment names the installation; its installer is the
+	// human behind a trigger_agents comment.
+	if comment.AuthorType == "plugin" && comment.AuthorID.Valid {
+		if installation, err := s.Queries.GetWorkspacePluginInstallation(ctx, db.GetWorkspacePluginInstallationParams{
+			WorkspaceID: comment.WorkspaceID,
+			ID:          comment.AuthorID,
+		}); err == nil {
+			facts.PluginInstaller = installation.InstalledBy
+		}
+	}
 	return attribution.ClassifyComment(facts, agentAuthoredSource)
 }
 

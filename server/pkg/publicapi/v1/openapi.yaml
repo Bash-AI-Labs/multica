@@ -92,14 +92,15 @@ paths:
       operationId: createIssueComment
       summary: Create an issue comment without mention dispatch
       description: >-
-        Mentions are not dispatched by default. Set trigger_agents to run the
-        same agent triggers a member's own comment would (mentions, then the
-        agent assignee). That requires the tasks:write grant. A member
-        credential runs them as that member; a call acting as the Plugin itself
-        runs them for the member who installed it, who granted tasks:write.
-        Either way the comment is authored by that member and marked with the
-        Plugin. If the installer has left the workspace the call is refused
-        with installer_membership_revoked.
+        Mentions are not dispatched by default. Set trigger_agents to wake
+        agents: mentioned agents first, otherwise the agent assignee. That
+        requires the tasks:write grant. A member credential runs the triggers
+        with that member's permissions and authors the comment as them, marked
+        with the Plugin. A call acting as the Plugin itself authors the comment
+        as the Plugin and runs the triggers with the permissions of the member
+        who installed it; those runs are attributed to that member
+        (plugin_installer). If the installer has left the workspace the call is
+        refused with installer_membership_revoked.
       x-multica-contract: shared_resource
       x-multica-scope: comments:write
       requestBody:
@@ -503,7 +504,7 @@ components:
         trigger_agents:
           type: boolean
           default: false
-          description: Run agent triggers as a member (see createIssueComment). Requires tasks:write.
+          description: Wake the mentioned agents or the agent assignee with a member's permissions (see createIssueComment). Requires tasks:write.
     PullRequest:
       type: object
       required: [id, provider, repo_owner, repo_name, number, title, state, html_url, branch, created_at]

@@ -85,9 +85,10 @@ type CommentListResponse struct {
 type CreateCommentRequest struct {
 	Content  string  `json:"content"`
 	ParentID *string `json:"parent_id,omitempty"`
-	// TriggerAgents runs the same agent triggers a member's own comment would.
-	// It needs the tasks:write grant. A call acting as the Plugin itself runs
-	// them for, and writes the comment as, the member who installed it.
+	// TriggerAgents wakes the mentioned agents, otherwise the agent assignee.
+	// It needs the tasks:write grant. A call acting as the Plugin itself keeps
+	// the Plugin as the author and runs the triggers with the permissions of
+	// the member who installed it.
 	TriggerAgents bool `json:"trigger_agents,omitempty"`
 }
 

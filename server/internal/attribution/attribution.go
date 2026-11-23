@@ -67,6 +67,13 @@ const (
 	// human degrades to the publisher of the rule's active version (MUL-4302 §3.4),
 	// while authorization carries none. Precise for audit, deliberately powerless.
 	SourceRuleOwner Source = "rule_owner"
+	// SourcePluginInstaller — a Plugin acting as itself (its own poller or an
+	// event hook, no person behind the call) wrote a comment that asked to wake
+	// agents. The human is the member who installed the Plugin and granted it
+	// tasks:write, re-checked as a workspace member when the comment was
+	// written. Like trigger_owner, installing and granting is the authorization,
+	// so this human is the originator as well as the accountable.
+	SourcePluginInstaller Source = "plugin_installer"
 	// SourceOwnerFallback — nothing above resolved a human, so attribution
 	// degrades to the agent owner. This is DEGRADED, not compliance-grade, and
 	// must be surfaced distinctly (MUL-4302 §3.5).
@@ -85,7 +92,7 @@ const (
 // attribution-coverage health metric (MUL-4302 §9).
 func (src Source) Precise() bool {
 	switch src {
-	case SourceDirectHuman, SourceDelegation, SourceCommentSource, SourceTriggerOwner, SourceRuleOwner:
+	case SourceDirectHuman, SourceDelegation, SourceCommentSource, SourceTriggerOwner, SourceRuleOwner, SourcePluginInstaller:
 		return true
 	default:
 		return false
@@ -208,7 +215,7 @@ func finalizeAttribution(r Result) Result {
 // by the caller from the DB and passed in so classification stays pure.
 type CommentFacts struct {
 	CommentID  pgtype.UUID
-	AuthorType string // "member" | "agent" | other
+	AuthorType string // "member" | "agent" | "plugin" | other
 	AuthorID   pgtype.UUID
 	CreatedAt  pgtype.Timestamptz
 
@@ -226,6 +233,11 @@ type CommentFacts struct {
 	// dropping the chain root to unattributed. Loaded by the caller alongside
 	// ParentOriginator; invalid when the parent has no accountable human either.
 	ParentAccountable pgtype.UUID
+
+	// PluginInstaller is, for a plugin-authored comment, the member who
+	// installed that Plugin. Left invalid when the installation is gone or
+	// records no installer.
+	PluginInstaller pgtype.UUID
 }
 
 // ClassifyComment resolves attribution for a comment-triggered run from
@@ -270,6 +282,19 @@ func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 			r.Source = SourceUnattributed
 		}
 		return finalizeAttribution(r)
+	case "plugin":
+		// Only a trigger_agents comment reaches the trigger path, and the handler
+		// refuses one whose installer has left, so a valid installer here is the
+		// member whose authority the run uses.
+		if !f.PluginInstaller.Valid {
+			return finalizeAttribution(Result{Source: SourceUnattributed, EvidenceKind: EvidenceComment, EvidenceRefID: f.CommentID})
+		}
+		return finalizeAttribution(Result{
+			UserID:        f.PluginInstaller,
+			Source:        SourcePluginInstaller,
+			EvidenceKind:  EvidenceComment,
+			EvidenceRefID: f.CommentID,
+		})
 	default:
 		return finalizeAttribution(Result{Source: SourceUnattributed, EvidenceKind: EvidenceComment, EvidenceRefID: f.CommentID})
 	}

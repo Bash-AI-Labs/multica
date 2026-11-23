@@ -429,6 +429,8 @@ func TestPluginCommentTriggerAgentsNeedsTasksWrite(t *testing.T) {
 	}
 }
 
+// A Plugin acting as itself keeps its own name on the comment and lends only
+// the installer's authority to the run it starts.
 func TestPluginOwnTriggerRunsForTheInstaller(t *testing.T) {
 	agentID := createHandlerTestAgent(t, "Plugin Installer Assignee", nil)
 	issueID := createCommentTriggerPreviewIssue(t, "plugin trigger as installer", "agent", agentID)
@@ -444,20 +446,32 @@ func TestPluginOwnTriggerRunsForTheInstaller(t *testing.T) {
 		return recorder
 	}
 
-	if recorder := post("preview review is ready"); recorder.Code != http.StatusCreated {
+	recorder := post("preview review is ready")
+	if recorder.Code != http.StatusCreated {
 		t.Fatalf("plugin trigger status=%d body=%s", recorder.Code, recorder.Body.String())
-	} else if !strings.Contains(recorder.Body.String(), `"author_type":"member"`) || !strings.Contains(recorder.Body.String(), testUserID) {
-		t.Fatalf("plugin trigger comment is not authored by the installer: %s", recorder.Body.String())
 	}
-	var originator string
-	dbfx.QueryRow(t, `SELECT originator_user_id::text FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
-		issueID, agentID).Scan(&originator)
-	if originator != testUserID {
-		t.Fatalf("plugin-triggered task originator = %q, want installer %s", originator, testUserID)
+	var comment struct {
+		ID         string `json:"id"`
+		AuthorType string `json:"author_type"`
+		AuthorID   string `json:"author_id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &comment); err != nil {
+		t.Fatalf("decode comment: %v", err)
+	}
+	if comment.AuthorType != "plugin" || comment.AuthorID != installationID {
+		t.Fatalf("plugin trigger comment author = %s %s, want the plugin %s", comment.AuthorType, comment.AuthorID, installationID)
+	}
+	var originator, accountable, source, triggerComment string
+	dbfx.QueryRow(t, `SELECT originator_user_id::text, accountable_user_id::text, originator_source, trigger_comment_id::text
+		FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		issueID, agentID).Scan(&originator, &accountable, &source, &triggerComment)
+	if originator != testUserID || accountable != testUserID || source != "plugin_installer" || triggerComment != comment.ID {
+		t.Fatalf("plugin-triggered task originator=%q accountable=%q source=%q trigger=%q, want installer %s via plugin_installer from %s",
+			originator, accountable, source, triggerComment, testUserID, comment.ID)
 	}
 
 	dbfx.Exec(t, `UPDATE plugin_installation SET installed_by = gen_random_uuid() WHERE id = $1`, installationID)
-	recorder := post("installer has left")
+	recorder = post("installer has left")
 	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "installer_membership_revoked") {
 		t.Fatalf("trigger after installer left status=%d body=%s", recorder.Code, recorder.Body.String())
 	}

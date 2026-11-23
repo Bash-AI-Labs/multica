@@ -874,6 +874,7 @@
       "source_comment_source": "Desde una conversación de comentarios",
       "source_trigger_owner": "Creador del disparador de la automatización",
       "source_rule_owner": "Publicador de la regla de la automatización",
+      "source_plugin_installer": "Instalador del plugin",
       "source_owner_fallback": "Sin responsable concreto; atribuido al propietario del agente",
       "source_backfill": "Atribución rellenada a posteriori",
       "source_unattributed": "No se determinó un miembro responsable"

@@ -176,6 +176,28 @@ func TestClassifyComment_AgentAuthoredParentWithoutHumanIsUnattributed(t *testin
 	}
 }
 
+func TestClassifyComment_PluginAuthoredResolvesToInstaller(t *testing.T) {
+	installation := uid(0x9C)
+	got := ClassifyComment(CommentFacts{
+		CommentID:       comment,
+		AuthorType:      "plugin",
+		AuthorID:        installation,
+		PluginInstaller: human,
+	}, SourceCommentSource)
+	if got.Source != SourcePluginInstaller || got.UserID != human || got.AccountableUserID != human || !got.Source.Precise() {
+		t.Fatalf("plugin comment = %+v, want the installer as a precise plugin_installer", got)
+	}
+	if got.EvidenceKind != EvidenceComment || got.EvidenceRefID != comment {
+		t.Errorf("evidence = %q/%v, want comment/%v", got.EvidenceKind, got.EvidenceRefID, comment)
+	}
+
+	// An installation that is gone has no human to lend.
+	orphan := ClassifyComment(CommentFacts{CommentID: comment, AuthorType: "plugin", AuthorID: installation}, SourceCommentSource)
+	if orphan.Source != SourceUnattributed || orphan.UserID.Valid {
+		t.Fatalf("orphan plugin comment = %+v, want unattributed", orphan)
+	}
+}
+
 func TestClassifyComment_SystemAuthoredIsUnattributed(t *testing.T) {
 	got := ClassifyComment(CommentFacts{
 		CommentID:  comment,

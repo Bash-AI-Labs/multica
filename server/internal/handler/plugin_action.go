@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -624,6 +625,8 @@ func publicPluginComment(comment db.Comment) publicapiv1.Comment {
 // to click a button in. Starting work is the explicit `trigger_agents` opt-in
 // instead: it needs the tasks:write grant the admin saw on the consent screen,
 // and runs under a member's own invoke permissions (see pluginTriggerMember).
+// The comment keeps its usual author either way; only the runs borrow the
+// member's authority.
 func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	caller, actor, ok := h.pluginCaller(w, r, plugincontract.ScopeCommentsWrite)
 	if !ok {
@@ -648,6 +651,7 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 		publicapiv1.WriteProblem(w, r, http.StatusBadRequest, "invalid_request", "content is too long")
 		return
 	}
+	// The member whose invoke permissions the triggered runs use.
 	var triggerMember db.Member
 	if req.TriggerAgents {
 		if !hasGrantedScope(caller.Scopes, plugincontract.ScopeTasksWrite) {
@@ -681,15 +685,9 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 	// call keeps their own name on the comment (via_plugin_id records that a
 	// plugin produced it); an event hook writes as the installation, because
 	// there is nobody to attribute it to.
-	//
-	// A comment that wakes agents is the exception: it is always written as the
-	// member whose authority starts the runs, because a run's accountable human
-	// is read from its trigger comment and a Plugin author resolves to nobody.
 	authorType := "member"
 	authorID := actor.Member.UserID
-	if req.TriggerAgents {
-		authorID = triggerMember.UserID
-	} else if !actor.isMember() {
+	if !actor.isMember() {
 		authorType = "plugin"
 		authorID = caller.Installation.ID
 	}
@@ -727,8 +725,10 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 		h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(caller.WorkspaceID), authorType, uuidToString(authorID), pgtype.UUID{})
 	}
 	if req.TriggerAgents {
-		member := uuidToString(authorID)
-		h.triggerTasksForComment(r.Context(), issue, comment, rootComment, authorType, member, member, nil, commentSteerRequest{})
+		// A plugin-authored trigger resolves its runs to the installer through
+		// the comment (attribution.SourcePluginInstaller); the originator passed
+		// here is that same member, for the invoke-permission checks.
+		h.triggerTasksForComment(r.Context(), issue, comment, rootComment, authorType, uuidToString(authorID), uuidToString(triggerMember.UserID), nil, commentSteerRequest{})
 	}
 
 	writeJSON(w, http.StatusCreated, publicPluginComment(comment))
@@ -737,8 +737,9 @@ func (h *Handler) CreatePluginComment(w http.ResponseWriter, r *http.Request) {
 // pluginTriggerMember is the person whose invoke permissions a trigger_agents
 // comment runs under: the member behind the call, or — when the Plugin acts as
 // itself, from a schedule or its own poller — the member who installed it and
-// granted tasks:write, the way an autopilot runs as its creator. Membership is
-// re-checked so a departed installer stops lending their authority.
+// granted tasks:write, the way an autopilot runs as its creator. The comment
+// itself stays the Plugin's: the installer lends authority, not their name.
+// Membership is re-checked so a departed installer stops lending it.
 func (h *Handler) pluginTriggerMember(w http.ResponseWriter, r *http.Request, caller service.PluginActionCaller, actor pluginActor) (db.Member, bool) {
 	if actor.isMember() {
 		return actor.Member, true
@@ -751,6 +752,23 @@ func (h *Handler) pluginTriggerMember(w http.ResponseWriter, r *http.Request, ca
 	}
 	publicapiv1.WriteProblem(w, r, http.StatusForbidden, "installer_membership_revoked", "the member who installed this Plugin is no longer in the workspace; reinstall it to let it wake agents")
 	return db.Member{}, false
+}
+
+// pluginAuthorName is the consented manifest name of the Plugin that wrote a
+// plugin-authored comment, or "" when the installation is gone.
+func (h *Handler) pluginAuthorName(ctx context.Context, comment db.Comment) string {
+	installation, err := h.Queries.GetWorkspacePluginInstallation(ctx, db.GetWorkspacePluginInstallationParams{
+		WorkspaceID: comment.WorkspaceID,
+		ID:          comment.AuthorID,
+	})
+	if err != nil {
+		return ""
+	}
+	manifest, err := service.ParseInstallationManifest(installation)
+	if err != nil {
+		return ""
+	}
+	return manifest.Name
 }
 
 // ListPluginPullRequestsByBranch — GET /v1/pull-requests

@@ -284,8 +284,9 @@ export interface TaskEvidence {
 export interface TaskAttribution {
   /**
    * Waterfall level that resolved the accountable human:
-   * `direct_human` | `delegation` | `comment_source` | `rule_owner` |
-   * `owner_fallback` | `backfill` | `unattributed`. Never blank.
+   * `direct_human` | `delegation` | `comment_source` | `trigger_owner` |
+   * `rule_owner` | `plugin_installer` | `owner_fallback` | `backfill` |
+   * `unattributed`. Never blank.
    */
   source: string;
   /** False for degraded sources (owner_fallback / backfill / unattributed). */
