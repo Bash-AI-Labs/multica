@@ -40,6 +40,7 @@ import type {
   WorkspaceFeatures,
   MemberLimit,
   StorageUsage,
+  AppCallUsage,
   WorkspaceSubscriptionSummary,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPlanPrices,
@@ -1700,7 +1701,16 @@ export const CommentSubIssueTaskResponseSchema = z.object({
   task_id: z.string().min(1),
 }).loose();
 
+const IssueBlockerSchema = z.object({
+  id: z.string(), identifier: z.string(), title: z.string(), status: z.string(),
+  via: z.string(), closed: z.boolean(),
+});
+
 export const IssueSchema = z.object({
+  blocked_count: z.number().int().nonnegative().optional().catch(undefined),
+  blocked_by: z.array(IssueBlockerSchema).optional().catch(undefined),
+  // Detail reads only: the issues waiting on this one.
+  blocking: z.array(IssueBlockerSchema).optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),
@@ -2272,6 +2282,12 @@ const DashboardUsageByAgentSchema = z.object({
 
 export const DashboardUsageByAgentListSchema = z.array(DashboardUsageByAgentSchema);
 
+const DashboardUsageBySquadSchema = DashboardUsageByAgentSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardUsageBySquadListSchema = z.array(DashboardUsageBySquadSchema);
+
 // `cancelled_count` defaults to 0 so an installed client pointed at a
 // backend that predates it still renders: those rows simply carry no
 // cancelled segment, which is exactly what that backend measured.
@@ -2285,6 +2301,12 @@ const DashboardAgentRunTimeSchema = z.object({
 }).loose();
 
 export const DashboardAgentRunTimeListSchema = z.array(DashboardAgentRunTimeSchema);
+
+const DashboardSquadRunTimeSchema = DashboardAgentRunTimeSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardSquadRunTimeListSchema = z.array(DashboardSquadRunTimeSchema);
 
 const DashboardRunTimeDailySchema = z.object({
   date: z.string().default(""),
@@ -2320,6 +2342,14 @@ const DashboardFailureByAgentSchema = z.object({
 
 export const DashboardFailureByAgentListSchema = z.array(
   DashboardFailureByAgentSchema,
+);
+
+const DashboardFailureBySquadSchema = DashboardFailureByAgentSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardFailureBySquadListSchema = z.array(
+  DashboardFailureBySquadSchema,
 );
 
 // Runtime usage schemas — the runtime-detail page's four usage endpoints
@@ -2509,12 +2539,18 @@ export const AgentTaskSchema = z.object({
   dispatched_at: z.string().nullable().default(null),
   started_at: z.string().nullable().default(null),
   completed_at: z.string().nullable().default(null),
+  transcript_purged_at: z.string().nullable().optional().catch(undefined),
+  transcript_purged_by: z.string().optional().catch(undefined),
   result: z.unknown().default(null),
   error: z.string().nullable().default(null),
   failure_reason: z.string().optional(),
   created_at: z.string().default(""),
   chat_session_id: z.string().optional(),
   autopilot_run_id: z.string().optional(),
+  squad_id: z.string().optional().catch(undefined),
+  is_leader_task: z.boolean().optional().catch(undefined),
+  doc_id: z.string().optional().catch(undefined),
+  doc_thread_id: z.string().optional().catch(undefined),
   parent_task_id: z.string().optional(),
   attempt: z.number().optional(),
   trigger_comment_id: z.string().optional(),
@@ -2631,6 +2667,20 @@ export const TaskContextReceiptResponseSchema = z.object({
   receipt: ContextReceiptSchema.nullable().catch(null),
   recorded_at: z.string().optional(),
 }).loose();
+
+// `DELETE /api/tasks/:id/messages` only answers 200 once the log is gone, so a
+// malformed body must still read as cleared; the caller fills the gaps.
+export const TaskTranscriptPurgeSchema = z.object({
+  transcript_purged_at: z.string().nullable().catch(null),
+  transcript_purged_by: z.string().catch(""),
+  messages_deleted: z.number().catch(0),
+}).loose();
+
+export const EMPTY_TASK_TRANSCRIPT_PURGE = {
+  transcript_purged_at: null,
+  transcript_purged_by: "",
+  messages_deleted: 0,
+};
 
 // Task cancellation (`POST /api/tasks/:id/cancel`) is consumed directly by
 // chat recovery. Its optional message payload must be well-formed before the
@@ -2954,6 +3004,8 @@ export const SquadSchema = z.object({
   archived_by: z.string().nullable().optional().transform((v) => v ?? null),
   member_count: z.number().default(0),
   member_preview: z.array(SquadMemberPreviewSchema).default([]),
+  // Older backends predate handoff modes; they always routed through the leader.
+  handoff_mode: z.enum(["leader", "direct"]).catch("leader").default("leader"),
 }).loose();
 
 export const SquadListSchema = z.array(SquadSchema);
@@ -2973,6 +3025,7 @@ export const EMPTY_SQUAD: Squad = {
   archived_by: null,
   member_count: 0,
   member_preview: [],
+  handoff_mode: "leader",
 };
 
 // Squad member status — backs the Squad detail page's Members tab. status
@@ -2999,6 +3052,18 @@ export const SquadMemberStatusListResponseSchema = z.object({
 }).loose();
 
 export const EMPTY_SQUAD_MEMBER_STATUS_LIST = { members: [] };
+
+export const SquadBriefsResponseSchema = z.object({
+  handoff_mode: z.enum(["leader", "direct"]).catch("leader").default("leader"),
+  briefs: z.array(z.object({
+    member_type: z.string(),
+    member_id: z.string(),
+    is_leader: z.boolean().default(false),
+    brief: z.string().default(""),
+  }).loose()).default([]),
+}).loose();
+
+export const EMPTY_SQUAD_BRIEFS = { handoff_mode: "leader" as const, briefs: [] };
 
 // Structured error body — POST /api/workspaces/:wsId/issues 409 conflict.
 //
@@ -3427,6 +3492,9 @@ export const SnoozedInboxListSchema = z.array(
       issue_id: z.string(),
       // Older servers omit it; the row then links by issue_id.
       issue_identifier: z.string().min(1).nullish().catch(null),
+      // Older servers omit them; the row then fetches the issue.
+      issue_title: z.string().nullish().catch(null),
+      issue_status: z.string().min(1).nullish().catch(null),
       item_id: z.string(),
       snoozed_until: z.string(),
       snoozed_at: z.string(),
@@ -3695,6 +3763,9 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
         // Newer than autopilot_runs: an older Cloud omits it, and a malformed
         // one only hides its own row.
         dashboard_history_days: WorkspaceEntitlementLimitSchema.nullable().catch(null).default(null),
+        // Newer still: an older Cloud omits it, and a malformed one only
+        // hides its own row.
+        app_tool_calls: WorkspaceEntitlementLimitSchema.nullable().catch(null).default(null),
       })
       .loose(),
     current_period_end: z.string().nullable().optional(),
@@ -3712,6 +3783,7 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
         autopilotRuns: value.limits.autopilot_runs,
         storageBytes: value.limits.storage_bytes ?? null,
         dashboardHistoryDays: value.limits.dashboard_history_days,
+        appToolCalls: value.limits.app_tool_calls,
       },
       currentPeriodEnd: value.current_period_end ?? null,
       snapshotExpiresAt: value.snapshot_expires_at ?? null,
@@ -4136,6 +4208,42 @@ export const StorageUsageSchema = z
             limitBytes: value.limit_bytes,
             reached:
               value.action === "enforce" && value.used_bytes !== null ? (value.reached ?? false) : null,
+          },
+  );
+
+// App call usage that cannot be read, or an action from a newer server, reads
+// as off: the gateway still checks every call. A malformed breakdown only
+// drops the breakdown.
+export const AppCallUsageSchema = z
+  .object({
+    action: z.enum(["off", "observe", "enforce"]).catch("off"),
+    used: z.number().int().nonnegative().nullable().catch(null).default(null),
+    limit: z.number().int().nonnegative().nullable().catch(null).default(null),
+    reached: z.boolean().nullable().catch(null).default(null),
+    reset_at: z.string().nullable().catch(null).default(null),
+    members: z
+      .array(
+        z.object({
+          user_id: z.string().nullable().catch(null).default(null),
+          calls: z.number().int().nonnegative(),
+        }),
+      )
+      .nullable()
+      .catch(null)
+      .default(null),
+  })
+  .loose()
+  .transform(
+    (value): AppCallUsage =>
+      value.action === "off" || value.limit === null || value.used === null
+        ? { action: "off", used: null, limit: null, reached: null, resetAt: null, members: [] }
+        : {
+            action: value.action,
+            used: value.used,
+            limit: value.limit,
+            reached: value.action === "enforce" ? (value.reached ?? value.used >= value.limit) : null,
+            resetAt: value.reset_at,
+            members: (value.members ?? []).map((m) => ({ userId: m.user_id, calls: m.calls })),
           },
   );
 
@@ -5053,9 +5161,11 @@ const AppCatalogEntrySchema = z.object({
   name: z.string().default(""),
   logo: z.string().optional().catch(undefined),
   category: z.string().optional().catch(undefined),
+  category_id: z.string().optional().catch(undefined),
   curated: z.boolean().default(false).catch(false),
   recommended_scope: AppAccountScopeSchema.optional(),
   allowed: z.boolean().optional().catch(undefined),
+  connect_method: z.enum(["oauth", "key"]).optional().catch(undefined),
 }).loose();
 
 export const AppCatalogResponseSchema = z.object({

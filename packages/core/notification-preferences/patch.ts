@@ -13,6 +13,7 @@ const PREFERENCE_DEFAULTS: { [K in PreferenceKey]-?: NonNullable<NotificationPre
   assignments: "all",
   status_changes: "muted",
   comments: "all",
+  squad_handoffs: "all",
   chat_replies: "all",
   mentions: "all",
   reactions: "all",
@@ -31,7 +32,6 @@ const PREFERENCE_DEFAULTS: { [K in PreferenceKey]-?: NonNullable<NotificationPre
   auto_archive_on_dates: "muted",
   auto_archive_on_labels: "muted",
   others_issues: "key_updates",
-  after_auto_archive: "stay",
   google_chat_webhook: "",
 };
 
